@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Browser Controller",
+  "short_name": "AgentCtrl",
+  "version": "1.0.0",
+  "description": "Autonomous browser-control interface for AI agent loops. Provides DOM inspection, element tagging, and trusted/synthetic event dispatch via WebSocket or HTTP polling.",
+  "minimum_chrome_version": "114",
+
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "debugger",
+    "alarms",
+    "offscreen",
+    "notifications"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Agent Browser Controller",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js", "content.css"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws: wss: http: https:;"
+  }
+}

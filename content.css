@@ -1,0 +1,119 @@
+/* =============================================================
+ * content.css — Styling for the page-side status overlay
+ * used by content.js. All selectors are namespaced with
+ * `__agent_browser_*` to avoid colliding with host CSS, and
+ * every rule uses !important because we must override the
+ * wild CSS that lives on real-world pages.
+ * ============================================================= */
+
+/* ---- Status badge (top-right pill) ---- */
+#__agent_browser_badge__ {
+  position: fixed !important;
+  top: 14px !important;
+  right: 14px !important;
+  display: none !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 7px 12px !important;
+  background: rgba(20, 20, 22, 0.86) !important;
+  color: #fff !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  line-height: 1 !important;
+  border-radius: 14px !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35) !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+  user-select: none !important;
+  letter-spacing: 0.01em !important;
+}
+#__agent_browser_badge__.is-visible { display: flex !important; }
+#__agent_browser_badge__.is-error {
+  background: rgba(255, 59, 48, 0.95) !important;
+}
+#__agent_browser_badge__.is-done {
+  background: rgba(48, 209, 88, 0.95) !important;
+}
+
+.__agent_browser_badge_dot__ {
+  width: 8px !important;
+  height: 8px !important;
+  border-radius: 50% !important;
+  background: #ff9500 !important;
+  box-shadow: 0 0 0 0 rgba(255, 149, 0, 0.7) !important;
+  animation: __agent_browser_pulse__ 1.4s ease-out infinite !important;
+  flex-shrink: 0 !important;
+}
+#__agent_browser_badge__.is-error .__agent_browser_badge_dot__ {
+  background: #fff !important;
+  animation: none !important;
+}
+#__agent_browser_badge__.is-done .__agent_browser_badge_dot__ {
+  background: #fff !important;
+  animation: none !important;
+}
+
+@keyframes __agent_browser_pulse__ {
+  0%   { box-shadow: 0 0 0 0   rgba(255, 149, 0, 0.7); }
+  70%  { box-shadow: 0 0 0 8px rgba(255, 149, 0, 0);   }
+  100% { box-shadow: 0 0 0 0   rgba(255, 149, 0, 0);   }
+}
+
+/* ---- Click ripple (visualizes where the agent clicked) ---- */
+.__agent_browser_ripple__ {
+  position: fixed !important;
+  width: 26px !important;
+  height: 26px !important;
+  margin: -13px 0 0 -13px !important;
+  border: 2px solid #ff3b30 !important;
+  border-radius: 50% !important;
+  background: rgba(255, 59, 48, 0.12) !important;
+  pointer-events: none !important;
+  z-index: 2147483646 !important;
+  animation: __agent_browser_ripple_anim__ 0.75s ease-out forwards !important;
+}
+@keyframes __agent_browser_ripple_anim__ {
+  0%   { transform: scale(0.4); opacity: 1; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+
+/* ---- Hover preview dot (shows what the model is about to act on) ---- */
+.__agent_browser_target_dot__ {
+  position: fixed !important;
+  width: 18px !important;
+  height: 18px !important;
+  margin: -9px 0 0 -9px !important;
+  border: 2px dashed #0a84ff !important;
+  border-radius: 50% !important;
+  pointer-events: none !important;
+  z-index: 2147483646 !important;
+  animation: __agent_browser_target_anim__ 1.2s ease-in-out infinite alternate !important;
+}
+@keyframes __agent_browser_target_anim__ {
+  0%   { transform: scale(0.9); opacity: 0.7; }
+  100% { transform: scale(1.1); opacity: 1.0; }
+}
+
+
+/* ---- Red anchor dot (fires on every click action) ---- */
+.__agent_browser_anchor__ {
+  position: fixed !important;
+  width: 14px !important;
+  height: 14px !important;
+  margin: -7px 0 0 -7px !important;
+  border: 2px solid #ff3b30 !important;
+  border-radius: 50% !important;
+  background: rgba(255, 59, 48, 0.25) !important;
+  box-shadow: 0 0 0 1px #ffffff !important, 0 2px 6px rgba(0, 0, 0, 0.35) !important;
+  pointer-events: none !important;
+  z-index: 2147483647 !important;
+  animation: __agent_browser_anchor_pulse__ 0.7s ease-out forwards !important;
+}
+@keyframes __agent_browser_anchor_pulse__ {
+  0%   { transform: scale(0.5); opacity: 0.6; }
+  20%  { transform: scale(1.2); opacity: 1.0; }
+  100% { transform: scale(2.6); opacity: 0.0; }
+}

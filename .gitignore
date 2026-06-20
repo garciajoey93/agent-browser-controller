@@ -1,0 +1,36 @@
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json.bak
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.log
+
+# Chrome extension build artifacts (not relevant for source-only repo)
+build/
+dist/
+coverage/
+.turbo/
+.next/
+.cache/
+
+# Test / dev artifacts (created during local testing)
+/tmp/
+*.png
+!icons/*.png
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+node_modules/.cache/

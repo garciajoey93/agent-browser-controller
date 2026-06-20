@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Controller Test Page</title>
+  <style>
+    body { font: 14px/1.5 -apple-system, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; margin-top: 32px; padding-top: 12px; border-top: 1px solid #eee; }
+    button, input { font: inherit; padding: 6px 10px; margin: 4px 0; }
+    button { background: #0a84ff; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+    input { border: 1px solid #aaa; border-radius: 4px; padding: 6px 8px; }
+    .log { background: #0f0f10; color: #d6d6d6; padding: 10px; border-radius: 6px; font: 12px/1.4 ui-monospace, Menlo, monospace; min-height: 80px; max-height: 200px; overflow: auto; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    #counter { font: 600 18px/1 sans-serif; padding: 8px 14px; background: #fff3cd; border-radius: 4px; display: inline-block; }
+    .spacer { height: 1200px; background: linear-gradient(#fff, #f4f4f4); border: 1px dashed #ddd; border-radius: 4px; }
+    .ok { color: #1a7a1a; }
+    .err { color: #a00; }
+  </style>
+</head>
+<body>
+  <h1 id="page-title">Agent Controller Test Page</h1>
+  <p>This page is the integration test target. Every interactive element below has a known ID and a deterministic side-effect the test runner can verify.</p>
+
+  <h2>1. Click target</h2>
+  <div class="row">
+    <button id="btn-click" type="button">Click me</button>
+    <span>Click count: <span id="click-count">0</span></span>
+    <span id="counter">counter</span>
+  </div>
+
+  <h2>2. Text input</h2>
+  <div class="row">
+    <input id="text-input" type="text" placeholder="type here" />
+    <span>Value: <code id="input-echo">(empty)</code></span>
+  </div>
+
+  <h2>3. Form submit</h2>
+  <form id="test-form" onsubmit="event.preventDefault(); document.getElementById('form-result').textContent = 'submitted: ' + document.getElementById('form-name').value; return false;">
+    <input id="form-name" type="text" placeholder="your name" />
+    <button id="btn-submit" type="submit">Submit</button>
+    <div id="form-result" style="margin-top:6px"></div>
+  </form>
+
+  <h2>4. Scrollable region</h2>
+  <div class="spacer" id="scroll-anchor">scroll target</div>
+  <p id="after-scroll" style="display:none">post-scroll content visible</p>
+
+  <h2>5. Log (event log)</h2>
+  <pre id="event-log" class="log"></pre>
+
+  <script>
+    // --- Event handlers that the test runner can verify ---
+
+    let clickCount = 0;
+    document.getElementById('btn-click').addEventListener('click', () => {
+      clickCount++;
+      document.getElementById('click-count').textContent = String(clickCount);
+      log('btn-click: count=' + clickCount);
+    });
+
+    const ti = document.getElementById('text-input');
+    ti.addEventListener('input', () => {
+      document.getElementById('input-echo').textContent = ti.value || '(empty)';
+    });
+
+    function log(msg) {
+      const el = document.getElementById('event-log');
+      const ts = new Date().toISOString().slice(11, 19);
+      el.textContent = '[' + ts + '] ' + msg + '\\n' + el.textContent;
+    }
+
+    // Show post-scroll element when scrolled into view
+    const obs = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) document.getElementById('after-scroll').style.display = '';
+      });
+    });
+    obs.observe(document.getElementById('scroll-anchor'));
+
+    // Test API exposed on window for evaluate-action tests
+    window.__test = {
+      ping: () => 'pong',
+      add: (a, b) => a + b,
+      getClickCount: () => clickCount,
+      getInputValue: () => ti.value,
+      navigateMarker: 'TEST_PAGE_LOADED_' + Date.now(),
+    };
+
+    log('test page loaded, marker=' + window.__test.navigateMarker);
+  </script>
+</body>
+</html>

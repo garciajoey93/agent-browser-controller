@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Controller</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <div class="title">
+      <span class="logo">🤖</span>
+      <h1>Agent Controller</h1>
+    </div>
+    <div id="status" class="status disconnected">Disconnected</div>
+  </header>
+
+  <section class="card">
+    <h2>Controller</h2>
+    <div class="row">
+      <label class="grow">
+        Transport
+        <select id="transport">
+          <option value="websocket">WebSocket</option>
+          <option value="polling">HTTP polling</option>
+        </select>
+      </label>
+    </div>
+    <label>
+      WebSocket URL
+      <input id="controllerUrl" type="text"
+             placeholder="ws://localhost:9223/ws" autocomplete="off" />
+    </label>
+    <label>
+      Polling URL
+      <input id="pollingUrl" type="text"
+             placeholder="http://localhost:9223/poll" autocomplete="off" />
+    </label>
+    <label>
+      Secret (optional)
+      <input id="pollingSecret" type="password" placeholder="bearer token (optional)" autocomplete="off" />
+    </label>
+    <div class="row">
+      <label class="checkbox">
+        <input id="autoConnect" type="checkbox" />
+        <span>Auto-connect on startup</span>
+      </label>
+    </div>
+    <div class="row">
+      <button id="connect"   class="primary">Connect</button>
+      <button id="disconnect"           >Disconnect</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Execution</h2>
+    <div class="row">
+      <label class="grow">
+        Coordinate system
+        <select id="coordMode">
+          <option value="normalized_1000">0–1000 normalized</option>
+          <option value="normalized_1">0–1 normalized</option>
+          <option value="pixel">CSS pixels</option>
+          <option value="device_pixel">Device pixels (÷ DPR)</option>
+        </select>
+      </label>
+      <label class="checkbox">
+        <input id="useDebugger" type="checkbox" checked />
+        <span>Trusted events</span>
+      </label>
+    </div>
+    <div class="row">
+      <label class="grow">
+        Type delay (ms/char)
+        <input id="typeDelay" type="number" min="0" max="200" step="2" value="12" />
+      </label>
+      <label class="grow">
+        Capture delay (ms)
+        <input id="captureDelay" type="number" min="0" max="5000" step="50" value="350" />
+      </label>
+      <label class="grow">
+        Max image dim
+        <input id="maxImageDim" type="number" min="320" max="4096" step="64" value="1280" />
+      </label>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Live state</h2>
+    <div class="row spread">
+      <span class="muted" id="tabInfo">No active tab</span>
+      <button id="capture" class="link-btn">Capture now</button>
+    </div>
+    <div id="screenshotBox" class="screenshot">
+      <div class="placeholder">Click <b>Capture now</b> to grab the active tab.</div>
+    </div>
+    <h3 class="subhead">Last action</h3>
+    <pre id="lastAction" class="codeblock">—</pre>
+  </section>
+
+  <section class="card">
+    <div class="row spread">
+      <h2>Log</h2>
+      <button id="clearLog" class="link-btn">clear</button>
+    </div>
+    <div id="log" class="log-body"></div>
+      <h3 class="subhead" style="margin-top:10px">Action history</h3>
+      <div id="historyList" class="log-body" style="max-height:120px"></div>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+{
+  "name": "agent-browser-controller",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MV3 extension + Node.js relay that lets any external agent (Codex, Python, curl) drive a real Chrome browser.",
+  "bin": {
+    "agent-controller": "./controller-server.js"
+  },
+  "scripts": {
+    "start": "node controller-server.js",
+    "start:public": "node controller-server.js --host 0.0.0.0",
+    "test": "node --test tests/",
+    "push:linear": "node scripts/push-to-linear.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
