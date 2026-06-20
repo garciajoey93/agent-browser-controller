@@ -91,6 +91,251 @@
     setTimeout(() => el.remove(), ms || 1500);
   }
 
+  // ------------------------------------------------------------------
+  // Coordinate crosshair — a small cursor that follows the mouse
+  // and shows the exact viewport coordinates under the pointer.
+  // Toggled on by SHOW_CROSSHAIR, off by HIDE_CROSSHAIR. Useful when
+  // the agent wants to verify the click target before committing;
+  // also useful for "screenshot-driven" debugging where the model
+  // needs to map a pixel in the image back to a CSS coordinate.
+  //
+  // The crosshair has two parts: a fine cross at the pointer and a
+  // ruler readout in the bottom-right showing the live x/y. Both
+  // are position:fixed with pointer-events:none so they never
+  // intercept actual page interactions.
+  // ------------------------------------------------------------------
+  const CROSS_STATE = { el: null, styleEl: null, readout: null };
+
+  function ensureCrosshair() {
+    if (CROSS_STATE.el && document.documentElement.contains(CROSS_STATE.el)) return;
+    if (!CROSS_STATE.styleEl) {
+      const s = document.createElement('style');
+      s.id = '__agent_browser_crosshair_style__';
+      s.textContent = [
+        '.__agent_crosshair__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483647 !important;',
+        '  pointer-events: none !important;',
+        '  width: 0 !important;',
+        '  height: 0 !important;',
+        '  left: 0 !important;',
+        '  top: 0 !important;',
+        '}',
+        '.__agent_crosshair__::before, .__agent_crosshair__::after {',
+        '  content: "" !important;',
+        '  position: absolute !important;',
+        '  background: #ff3b30 !important;',
+        '  box-shadow: 0 0 0 0.5px #fff !important;',
+        '}',
+        '.__agent_crosshair__::before {',
+        '  left: -20px !important; top: -0.5px !important;',
+        '  width: 40px !important; height: 1px !important;',
+        '}',
+        '.__agent_crosshair__::after {',
+        '  top: -20px !important; left: -0.5px !important;',
+        '  width: 1px !important; height: 40px !important;',
+        '}',
+        '.__agent_crosshair_dot__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483647 !important;',
+        '  pointer-events: none !important;',
+        '  width: 4px !important;',
+        '  height: 4px !important;',
+        '  margin: -2px 0 0 -2px !important;',
+        '  background: #ff3b30 !important;',
+        '  border: 1px solid #fff !important;',
+        '  border-radius: 50% !important;',
+        '  box-sizing: border-box !important;',
+        '}',
+        '.__agent_crosshair_readout__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483647 !important;',
+        '  bottom: 8px !important;',
+        '  right: 8px !important;',
+        '  padding: 6px 10px !important;',
+        '  background: rgba(20,20,22,0.92) !important;',
+        '  color: #fff !important;',
+        '  font: 600 11px/1 ui-monospace, Menlo, monospace !important;',
+        '  border-radius: 6px !important;',
+        '  pointer-events: none !important;',
+        '  box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;',
+        '  letter-spacing: 0.3px !important;',
+        '  font-feature-settings: "tnum" 1 !important;',
+        '}',
+        '.__agent_crosshair_readout__ b { color: #ff3b30; font-weight: 700; }',
+        '.__agent_crosshair_target__ {',
+        '  color: #aaa !important;',
+        '  font-weight: 400 !important;',
+        '  margin-left: 8px !important;',
+        '}',
+      ].join('\n');
+      (document.documentElement || document.body).appendChild(s);
+      CROSS_STATE.styleEl = s;
+    }
+    const cross = document.createElement('div');
+    cross.className = '__agent_crosshair__';
+    cross.id = '__agent_browser_crosshair__';
+    (document.documentElement || document.body).appendChild(cross);
+    CROSS_STATE.el = cross;
+    const dot = document.createElement('div');
+    dot.className = '__agent_crosshair_dot__';
+    dot.id = '__agent_browser_crosshair_dot__';
+    (document.documentElement || document.body).appendChild(dot);
+    CROSS_STATE.dot = dot;
+    const readout = document.createElement('div');
+    readout.className = '__agent_crosshair_readout__';
+    readout.id = '__agent_browser_crosshair_readout__';
+    (document.documentElement || document.body).appendChild(readout);
+    CROSS_STATE.readout = readout;
+    // Track the pointer across the whole window. Use mousemove on
+    // capture phase so we get the coords even when the cursor is
+    // over a page element that swallows mousemove.
+    CROSS_STATE._move = (ev) => {
+      const x = Math.round(ev.clientX), y = Math.round(ev.clientY);
+      if (CROSS_STATE.el) {
+        CROSS_STATE.el.style.left = x + 'px';
+        CROSS_STATE.el.style.top  = y + 'px';
+      }
+      if (CROSS_STATE.dot) {
+        CROSS_STATE.dot.style.left = x + 'px';
+        CROSS_STATE.dot.style.top  = y + 'px';
+      }
+      if (CROSS_STATE.readout) {
+        // Show coordinates + the element under the pointer so the
+        // model can verify "if I click here, I would click X".
+        const el = document.elementFromPoint(x, y);
+        const tag = el ? (el.tagName || '').toLowerCase() : '-';
+        const id  = el && el.id ? '#' + el.id : '';
+        const cls = el && el.className && typeof el.className === 'string' && el.className ? '.' + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join('.') : '';
+        CROSS_STATE.readout.innerHTML = 'x:<b>' + x + '</b> y:<b>' + y + '</b><span class="__agent_crosshair_target__">' + tag + id + cls + '</span>';
+      }
+    };
+    window.addEventListener('mousemove', CROSS_STATE._move, { capture: true, passive: true });
+  }
+
+  function hideCrosshair() {
+    if (CROSS_STATE.el) CROSS_STATE.el.style.display = 'none';
+    if (CROSS_STATE.dot) CROSS_STATE.dot.style.display = 'none';
+    if (CROSS_STATE.readout) CROSS_STATE.readout.style.display = 'none';
+  }
+
+  function showCrosshair() {
+    ensureCrosshair();
+    if (CROSS_STATE.el) CROSS_STATE.el.style.display = '';
+    if (CROSS_STATE.dot) CROSS_STATE.dot.style.display = '';
+    if (CROSS_STATE.readout) CROSS_STATE.readout.style.display = '';
+  }
+
+  function destroyCrosshair() {
+    if (CROSS_STATE._move) {
+      window.removeEventListener('mousemove', CROSS_STATE._move, { capture: true });
+      CROSS_STATE._move = null;
+    }
+    if (CROSS_STATE.el && CROSS_STATE.el.parentNode) CROSS_STATE.el.parentNode.removeChild(CROSS_STATE.el);
+    if (CROSS_STATE.dot && CROSS_STATE.dot.parentNode) CROSS_STATE.dot.parentNode.removeChild(CROSS_STATE.dot);
+    if (CROSS_STATE.readout && CROSS_STATE.readout.parentNode) CROSS_STATE.readout.parentNode.removeChild(CROSS_STATE.readout);
+    if (CROSS_STATE.styleEl && CROSS_STATE.styleEl.parentNode) CROSS_STATE.styleEl.parentNode.removeChild(CROSS_STATE.styleEl);
+    CROSS_STATE.el = CROSS_STATE.dot = CROSS_STATE.readout = CROSS_STATE.styleEl = null;
+  }
+
+  // ------------------------------------------------------------------
+  // Drag-and-drop visual feedback: shows a start dot, an end dot,
+  // and a dashed line between them while a drag is in progress.
+  // Most useful for sortable lists, kanban boards, file uploads.
+  // ------------------------------------------------------------------
+  const DRAG_STATE = { active: false, startX: 0, startY: 0, endX: 0, endY: 0, layer: null };
+
+  function ensureDragLayer() {
+    if (DRAG_STATE.layer && document.documentElement.contains(DRAG_STATE.layer)) return;
+    const root = document.createElement('div');
+    root.id = '__agent_browser_drag_layer__';
+    root.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647';
+    const s = document.createElement('style');
+    s.id = '__agent_browser_drag_style__';
+    s.textContent = [
+      '.__agent_drag_start__, .__agent_drag_end__ {',
+      '  position: fixed !important;',
+      '  z-index: 2147483647 !important;',
+      '  pointer-events: none !important;',
+      '  width: 12px !important; height: 12px !important;',
+      '  margin: -6px 0 0 -6px !important;',
+      '  border: 2px solid #fff !important;',
+      '  border-radius: 50% !important;',
+      '  box-shadow: 0 0 0 2px #0a84ff, 0 2px 6px rgba(0,0,0,0.4) !important;',
+      '}',
+      '.__agent_drag_end__ {',
+      '  border-color: #fff !important;',
+      '  box-shadow: 0 0 0 2px #ff3b30, 0 2px 6px rgba(0,0,0,0.4) !important;',
+      '}',
+      '.__agent_drag_line__ {',
+      '  position: fixed !important;',
+      '  z-index: 2147483647 !important;',
+      '  pointer-events: none !important;',
+      '  background: repeating-linear-gradient(90deg, #0a84ff 0 6px, transparent 6px 10px) !important;',
+      '  height: 2px !important;',
+      '  transform-origin: 0 50% !important;',
+      '  box-shadow: 0 1px 2px rgba(0,0,0,0.3) !important;',
+      '}',
+    ].join('\n');
+    (document.documentElement || document.body).appendChild(s);
+    (document.documentElement || document.body).appendChild(root);
+    DRAG_STATE.layer = root;
+    DRAG_STATE.styleEl = s;
+  }
+
+  function drawDrag() {
+    if (!DRAG_STATE.layer) return;
+    DRAG_STATE.layer.innerHTML = '';
+    const start = document.createElement('div');
+    start.className = '__agent_drag_start__';
+    start.style.left = DRAG_STATE.startX + 'px';
+    start.style.top  = DRAG_STATE.startY + 'px';
+    DRAG_STATE.layer.appendChild(start);
+    const end = document.createElement('div');
+    end.className = '__agent_drag_end__';
+    end.style.left = DRAG_STATE.endX + 'px';
+    end.style.top  = DRAG_STATE.endY + 'px';
+    DRAG_STATE.layer.appendChild(end);
+    // Line from start to end
+    const dx = DRAG_STATE.endX - DRAG_STATE.startX;
+    const dy = DRAG_STATE.endY - DRAG_STATE.startY;
+    const len = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    const line = document.createElement('div');
+    line.className = '__agent_drag_line__';
+    line.style.left = DRAG_STATE.startX + 'px';
+    line.style.top  = DRAG_STATE.startY + 'px';
+    line.style.width = len + 'px';
+    line.style.transform = 'rotate(' + angle + 'deg)';
+    DRAG_STATE.layer.appendChild(line);
+  }
+
+  function startDrag({ x, y }) {
+    ensureDragLayer();
+    DRAG_STATE.active = true;
+    DRAG_STATE.startX = DRAG_STATE.endX = Math.round(x);
+    DRAG_STATE.startY = DRAG_STATE.endY = Math.round(y);
+    drawDrag();
+    return { ok: true, x: DRAG_STATE.startX, y: DRAG_STATE.startY };
+  }
+
+  function updateDrag({ x, y }) {
+    if (!DRAG_STATE.active) return { ok: false, error: 'no drag in progress' };
+    DRAG_STATE.endX = Math.round(x);
+    DRAG_STATE.endY = Math.round(y);
+    drawDrag();
+    return { ok: true, x: DRAG_STATE.endX, y: DRAG_STATE.endY };
+  }
+
+  function endDrag() {
+    if (!DRAG_STATE.active) return { ok: false, error: 'no drag in progress' };
+    const s = { x: DRAG_STATE.startX, y: DRAG_STATE.startY };
+    const e = { x: DRAG_STATE.endX, y: DRAG_STATE.endY };
+    DRAG_STATE.active = false;
+    if (DRAG_STATE.layer) DRAG_STATE.layer.innerHTML = '';
+    return { ok: true, start: s, end: e };
+  }
+
   // Red anchor dot — fires on every click action. High-contrast,
   // z-index 2147483647, !important, so it survives on hostile
   // pages. This is the "where the agent clicked" indicator
@@ -881,6 +1126,33 @@
           case 'CLEAR_TAGS': {
             clearTags();
             reply(sendResponse, { ok: true });
+            break;
+          }
+          case 'SHOW_CROSSHAIR': {
+            showCrosshair();
+            reply(sendResponse, { ok: true });
+            break;
+          }
+          case 'HIDE_CROSSHAIR': {
+            hideCrosshair();
+            reply(sendResponse, { ok: true });
+            break;
+          }
+          case 'DESTROY_CROSSHAIR': {
+            destroyCrosshair();
+            reply(sendResponse, { ok: true });
+            break;
+          }
+          case 'START_DRAG': {
+            reply(sendResponse, startDrag({ x: msg.x, y: msg.y }));
+            break;
+          }
+          case 'UPDATE_DRAG': {
+            reply(sendResponse, updateDrag({ x: msg.x, y: msg.y }));
+            break;
+          }
+          case 'END_DRAG': {
+            reply(sendResponse, endDrag());
             break;
           }
           case 'LIST_TAGS': {

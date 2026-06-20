@@ -107,3 +107,33 @@ test('screenshot returns bytes', async () => {
   assert.ok(r.base64 && r.base64.length > 0);
   await driver.close();
 });
+
+test('showCrosshair injects the overlay (verified via proof)', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<button>x</button>') });
+  const r = await driver.showCrosshair();
+  assert.equal(r.ok, true);
+  assert.equal(r.proof.status, 'injected', JSON.stringify(r.proof));
+  assert.equal(r.proof.readoutFound, true, 'readout element found right after injection');
+  await driver.hideCrosshair();
+  await driver.close();
+});
+
+test('startDrag / updateDrag / endDrag produce a clean trace', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<div style="width:2000px;height:2000px"></div>') });
+  const s = await driver.startDrag({ x: 100, y: 100 });
+  assert.equal(s.ok, true);
+  // The proof is computed inside the same evaluate as the injection,
+  // so it always reflects the real state. (Cross-evaluate reads can
+  // be stale in some test isolation scenarios.)
+  assert.equal(s.proof.startX, 100, JSON.stringify(s.proof));
+  assert.equal(s.proof.startY, 100);
+  const u = await driver.updateDrag({ x: 500, y: 300 });
+  assert.equal(u.ok, true);
+  const e = await driver.endDrag();
+  assert.equal(e.ok, true);
+  assert.equal(e.start.x, 100);
+  assert.equal(e.start.y, 100);
+  assert.equal(e.end.x, 500);
+  assert.equal(e.end.y, 300);
+  await driver.close();
+});

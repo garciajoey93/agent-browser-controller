@@ -286,6 +286,11 @@ async function execAction(req) {
       case 'hover_by_tag':
       case 'clear_tags':
       case 'list_tags':
+      case 'show_crosshair':
+      case 'hide_crosshair':
+      case 'start_drag':
+      case 'update_drag':
+      case 'end_drag':
         return { ok: false, error: action + ' is only supported by the real extension (content.js), not the mock' };
       default:
         return { ok: false, error: 'Unknown action: ' + action };

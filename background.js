@@ -720,6 +720,26 @@ async function executeAction(request) {
         await sendToContent(tabId, { type: 'CLEAR_TAGS' });
         return { ok: true };
       }
+      case 'show_crosshair': {
+        await sendToContent(tabId, { type: 'SHOW_CROSSHAIR' });
+        return { ok: true };
+      }
+      case 'hide_crosshair': {
+        await sendToContent(tabId, { type: 'HIDE_CROSSHAIR' });
+        return { ok: true };
+      }
+      case 'start_drag': {
+        const r = await sendToContent(tabId, { type: 'START_DRAG', x: p.x, y: p.y });
+        return r && r.ok ? r : (r || { ok: false, error: 'start_drag failed' });
+      }
+      case 'update_drag': {
+        const r = await sendToContent(tabId, { type: 'UPDATE_DRAG', x: p.x, y: p.y });
+        return r && r.ok ? r : (r || { ok: false, error: 'update_drag failed' });
+      }
+      case 'end_drag': {
+        const r = await sendToContent(tabId, { type: 'END_DRAG' });
+        return r && r.ok ? r : (r || { ok: false, error: 'end_drag failed' });
+      }
       case 'list_tags': {
         const r = await sendToContent(tabId, { type: 'LIST_TAGS' });
         return r && r.ok ? r : (r || { ok: false, error: 'list_tags failed' });

@@ -260,6 +260,8 @@ const KNOWN_ACTIONS = new Set([
   // to the content script and don't require chrome.debugger.
   'tag_elements', 'click_by_tag', 'type_by_tag', 'hover_by_tag',
   'clear_tags', 'list_tags',
+  // Coordinate crosshair + drag visualization
+  'show_crosshair', 'hide_crosshair', 'start_drag', 'update_drag', 'end_drag',
 ]);
 function validateAction(body) {
   if (!body || typeof body !== 'object') {
