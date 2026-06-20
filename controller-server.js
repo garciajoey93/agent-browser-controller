@@ -43,6 +43,20 @@ const HOST = arg('host', process.env.HOST || '127.0.0.1');
 // ------------------------------------------------------------------
 let extensionWs = null;
 const clients    = new Set();
+const sseClients  = new Set();
+
+// IPI-307/310/311: metrics, history, in-flight tracking. Every action is
+// recorded here so /history, /metrics, /action/replay/:id can serve
+// it without re-asking the extension. Bounded by MAX_HISTORY entries.
+const METRICS = {
+  actions_total: 0,
+  actions_ok: 0,
+  actions_err: 0,
+  inflight: new Map(),    // clientKey -> count
+  history:   [],          // newest at the end
+  MAX_INFLIGHT_PER_CLIENT: 64,
+  MAX_HISTORY: 1000,
+};
 const pending    = new Map(); // id -> { resolve, reject, timer }
 const completed  = new Map(); // idempotencyKey -> { response, ts }
 const COMPLETED_TTL_MS = 5 * 60 * 1000;
@@ -80,8 +94,27 @@ function resolvePending(id, payload) {
 }
 
 function broadcastToClients(obj) {
-  for (const c of clients) send(c, obj);
-  for (const cb of SSE_CLIENTS) { try { cb(obj); } catch {} }
+  for (const c of clients) { try { send(c, obj); } catch {} }
+  for (const cb of sseClients) { try { cb(obj); } catch {} }
+}
+
+// ---- METRICS helpers ----
+function incrInflight(clientKey) {
+  METRICS.inflight.set(clientKey, (METRICS.inflight.get(clientKey) || 0) + 1);
+  METRICS.actions_total++;
+}
+function decrInflight(clientKey) {
+  const n = METRICS.inflight.get(clientKey) || 0;
+  if (n <= 1) METRICS.inflight.delete(clientKey);
+  else METRICS.inflight.set(clientKey, n - 1);
+}
+function recordAction(entry) {
+  METRICS.history.push(entry);
+  if (METRICS.history.length > METRICS.MAX_HISTORY) {
+    METRICS.history.splice(0, METRICS.history.length - METRICS.MAX_HISTORY);
+  }
+  if (entry.ok) METRICS.actions_ok++;
+  else METRICS.actions_err++;
 }
 
 // ------------------------------------------------------------------
@@ -269,7 +302,10 @@ async function handleHttp(req, res) {
       const body = await readBody(req);
       const validationError = validateAction(body);
       if (validationError) return jsonResponse(res, 400, validationError);
-      const clientKey = req.socket.remoteAddress + ':' + req.socket.remotePort;
+      // Key by IP only. remotePort is ephemeral per connection, so
+      // IP+port would let a single client bypass the limit by
+      // opening many parallel connections.
+      const clientKey = req.socket.remoteAddress || 'unknown';
       if ((METRICS.inflight.get(clientKey) || 0) >= METRICS.MAX_INFLIGHT_PER_CLIENT) {
         return jsonResponse(res, 429, { ok: false, error: 'too many in-flight requests for this client', errorCode: 'RATE_LIMITED' });
       }
@@ -366,9 +402,9 @@ async function handleHttp(req, res) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
       res.write('event: hello\ndata: {"ok":true}\n\n');
       const onEvent = (p) => { try { res.write('data: ' + JSON.stringify(p) + '\n\n'); } catch {} };
-      SSE_CLIENTS.add(onEvent);
+      sseClients.add(onEvent);
       const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
-      req.on('close', () => { clearInterval(ping); SSE_CLIENTS.delete(onEvent); });
+      req.on('close', () => { clearInterval(ping); sseClients.delete(onEvent); });
       return;
     }
     if (url.pathname === '/reload' && (req.method === 'POST' || req.method === 'GET')) {
@@ -545,7 +581,12 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     clearTimeout(helloTimer);
-    if (role === 'extension') {
+    if (role === 'extension' && extensionWs === ws) {
+      // Only null out if this WS is still the current extension. When a
+      // new extension replaces the old one, the new register path calls
+      // extensionWs.close() which fires our close handler - but the new
+      // extension has already taken over extensionWs, so we must NOT
+      // clear it here or /status will lie.
       extensionWs = null;
       console.log('[ws] extension disconnected', addr);
       broadcastToClients({ type: 'event', event: 'extension_disconnected' });

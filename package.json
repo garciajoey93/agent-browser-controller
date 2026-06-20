@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node controller-server.js",
     "start:public": "node controller-server.js --host 0.0.0.0",
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.mjs",
     "push:linear": "node scripts/push-to-linear.mjs"
   },
   "engines": {

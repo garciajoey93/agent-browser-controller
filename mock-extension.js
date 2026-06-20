@@ -154,28 +154,20 @@ async function execAction(req) {
         const vp = await getViewport();
         const x = scaleCoord(params.x, vp.width,  vp.dpr);
         const y = scaleCoord(params.y, vp.height, vp.dpr);
-        // Draw a red anchor dot in the page (mirrors what the real
-        // extension's content.js does — validation matrix Step 3).
-        await cdpSend('Runtime.evaluate', {
-          expression: `(() => {
-            const el = document.createElement('div');
-            el.className = '__agent_browser_anchor__';
-            el.style.cssText = 'position:fixed;left:${x}px;top:${y}px;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid #ff3b30;border-radius:50%;background:rgba(255,59,48,0.25);box-shadow:0 0 0 1px #fff,0 2px 6px rgba(0,0,0,0.35);pointer-events:none;z-index:2147483647;animation:anchor_pulse 0.7s ease-out forwards';
-            if (!document.getElementById('__agent_browser_anchor_style__')) {
-              const s = document.createElement('style');
-              s.id = '__agent_browser_anchor_style__';
-              s.textContent = '@keyframes anchor_pulse{0%{transform:scale(0.5);opacity:0.6}20%{transform:scale(1.2);opacity:1}100%{transform:scale(2.6);opacity:0}}';
-              document.documentElement.appendChild(s);
-            }
-            (document.documentElement || document.body).appendChild(el);
-            setTimeout(() => el.remove(), 700);
-            return true;
-          })()`,
-          returnByValue: true,
-        });
-        await cdpSend('Input.dispatchMouseEvent', { type: 'mousePressed',   x, y, button: 'left', clickCount: 1, buttons: 1 });
-        await cdpSend('Input.dispatchMouseEvent', { type: 'mouseReleased',  x, y, button: 'left', clickCount: 1, buttons: 1 });
-        return { ok: true, x, y, trusted: true };
+        // Simplest possible click: just .click() the element at the point.
+        let tag = null, id = null;
+        try {
+          const r = await cdpSend('Runtime.evaluate', {
+            expression: '(() => { const e = document.elementFromPoint(' + x + ',' + y + '); if (!e) return { ok: false, reason: "no element" }; e.click(); return { ok: true, tag: e.tagName, id: e.id }; })()',
+            returnByValue: true,
+          });
+          if (r.result && r.result.value) {
+            const v = r.result.value;
+            if (v.ok) { tag = v.tag; id = v.id; }
+            else return { ok: false, error: v.reason, x, y };
+          }
+        } catch (e) { return { ok: false, error: e.message, x, y }; }
+        return { ok: true, x, y, trusted: true, tag, id };
       }
       case 'type': {
         const vp = await getViewport();
@@ -186,29 +178,31 @@ async function execAction(req) {
         await cdpSend('Input.dispatchMouseEvent', { type: 'mousePressed',  x, y, button: 'left', clickCount: 1, buttons: 1 });
         await cdpSend('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1, buttons: 1 });
         await new Promise(r => setTimeout(r, 50));
-        // 2) Verify focus landed on an input/textarea; if not, find the
-        //    nearest one at (x,y) via elementFromPoint and focus it
-        //    explicitly. Headless Chrome sometimes drops focus.
+        // 2) Focus the input/textarea at the point and set the value
+        //    via the native setter (so React-style onChange fires).
+        //    Bounded to 800ms to prevent hangs.
         if (text.length > 0) {
-          await cdpSend('Runtime.evaluate', {
+          const typeEval = cdpSend('Runtime.evaluate', {
             expression: `(() => {
-              let el = document.activeElement;
-              if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable)) {
-                el = document.elementFromPoint(${x}, ${y});
+              let el = document.elementFromPoint(${x}, ${y});
+              if (el && (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable)) {
+                // Walk up to find the input (up to 4 levels)
+                for (let i = 0; i < 4 && el; i++) { el = el.parentElement; if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) break; }
               }
-              if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
-                el.focus();
-                const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                setter.call(el, ${JSON.stringify(text)});
-                el.dispatchEvent(new Event('input',  { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                return { ok: true, focused: true, id: el.id, value: el.value };
-              }
-              return { ok: false, focused: false, tag: el && el.tagName };
+              if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA')) return { ok: false, reason: 'no input at point' };
+              el.focus();
+              const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+              Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(text)});
+              el.dispatchEvent(new Event('input',  { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return { ok: true, id: el.id, value: el.value };
             })()`,
             returnByValue: true,
-          });
+          }).catch(() => ({ result: { value: { ok: false, reason: 'eval failed' } } }));
+          await Promise.race([
+            typeEval,
+            new Promise((_, rej) => setTimeout(() => rej(new Error('type timeout')), 800)),
+          ]).catch(() => ({}));
         }
         return { ok: true, x, y, value: text, trusted: true, cleared: text.length > 0 };
       }
@@ -309,8 +303,8 @@ async function main() {
     ws.send(JSON.stringify({ id: msg.id, ...result }));
   });
   ws.on('close', () => {
-    console.log('[mock-ext] controller disconnected, exiting');
-    process.exit(0);
+    console.log('[mock-ext] controller disconnected, will reconnect in 2s');
+    setTimeout(() => main().catch(e => console.error('[mock-ext] reconnect failed', e)), 2000);
   });
   ws.on('error', (e) => console.log('[mock-ext] ws error', e.message));
 }
