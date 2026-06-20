@@ -686,6 +686,44 @@ async function executeAction(request) {
         });
         return { ok: true };
       }
+      // ---- Visual mousing tool: numbered element tags ----
+      case 'tag_elements': {
+        // Paint [1] [2] [3] ... badges on every interactive
+        // element in the viewport. Returns the full element list
+        // so the agent can pick a target by visible number.
+        const r = await sendToContent(tabId, {
+          type: 'TAG_ELEMENTS',
+          options: { max: p.max || 200 },
+        });
+        return r && r.ok ? r : (r || { ok: false, error: 'tag_elements failed' });
+      }
+      case 'click_by_tag': {
+        // Click the element with visible tag number p.num (e.g. 3
+        // for the third interactive element in the viewport). This
+        // is more robust than pixel coordinates: the tags re-paint
+        // on scroll/resize, so the agent can pick the same target
+        // even after the page reflows.
+        const r = await sendToContent(tabId, { type: 'CLICK_BY_TAG', num: p.num });
+        return r && r.ok ? r : (r || { ok: false, error: 'click_by_tag failed' });
+      }
+      case 'type_by_tag': {
+        const r = await sendToContent(tabId, {
+          type: 'TYPE_BY_TAG', num: p.num, text: String(p.text || ''),
+        });
+        return r && r.ok ? r : (r || { ok: false, error: 'type_by_tag failed' });
+      }
+      case 'hover_by_tag': {
+        const r = await sendToContent(tabId, { type: 'HOVER_BY_TAG', num: p.num });
+        return r && r.ok ? r : (r || { ok: false, error: 'hover_by_tag failed' });
+      }
+      case 'clear_tags': {
+        await sendToContent(tabId, { type: 'CLEAR_TAGS' });
+        return { ok: true };
+      }
+      case 'list_tags': {
+        const r = await sendToContent(tabId, { type: 'LIST_TAGS' });
+        return r && r.ok ? r : (r || { ok: false, error: 'list_tags failed' });
+      }
       default:
         return { ok: false, error: 'Unknown action: ' + action, errorCode: 'UNKNOWN_ACTION' };
     }

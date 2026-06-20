@@ -275,6 +275,18 @@ async function execAction(req) {
       }
       case 'set_status':
         return { ok: true };
+      // Visual mousing tool: numbered element tags. The real
+      // extension handles these in content.js; the mock doesn't
+      // inject content.js, so we stub them as "not supported" so
+      // the controller still accepts them and the test runner
+      // can detect the missing feature cleanly.
+      case 'tag_elements':
+      case 'click_by_tag':
+      case 'type_by_tag':
+      case 'hover_by_tag':
+      case 'clear_tags':
+      case 'list_tags':
+        return { ok: false, error: action + ' is only supported by the real extension (content.js), not the mock' };
       default:
         return { ok: false, error: 'Unknown action: ' + action };
     }

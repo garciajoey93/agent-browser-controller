@@ -313,6 +313,477 @@
   }
 
   // ------------------------------------------------------------------
+  // Visual mousing tool — numbered tags on every interactive element.
+  //
+  // The agent can:
+  //   1. TAG_ELEMENTS        — scan the viewport, paint [1] [2] [3] badges
+  //                            on every clickable / focusable element,
+  //                            return a stable id->element map.
+  //   2. CLICK_BY_TAG / TYPE_BY_TAG / HOVER_BY_TAG — operate on a tag
+  //                            id instead of fragile pixel coordinates.
+  //                            Robust against scroll, layout shift, and
+  //                            pages that re-render the DOM.
+  //   3. CLEAR_TAGS          — remove all badges + reset state.
+  //
+  // The tags use position:fixed so they track the element even if the
+  // layout reflows. The element map is the source of truth: tags are
+  // re-painted on scroll/resize. z-index 2147483647 + !important keep
+  // them visible on hostile pages.
+  // ------------------------------------------------------------------
+
+  // Selectors that match something the user (or model) can act on.
+  // Tuned to be inclusive but not noisy. Elements that are visually
+  // hidden (display:none, visibility:hidden, zero size, off-screen)
+  // are filtered out at paint time, not selector time.
+  const INTERACTIVE_SELECTOR = [
+    'a[href]',
+    'button',
+    'input:not([type="hidden"])',
+    'textarea',
+    'select',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="checkbox"]',
+    '[role="radio"]',
+    '[role="menuitem"]',
+    '[role="tab"]',
+    '[role="option"]',
+    '[role="switch"]',
+    '[role="combobox"]',
+    '[role="searchbox"]',
+    '[contenteditable="true"]',
+    '[tabindex]:not([tabindex="-1"])',
+    '[onclick]',
+  ].join(',');
+
+  // Per-element color: blue=button/link, green=input, orange=select,
+  // purple=contenteditable, red=other clickable. Color helps the model
+  // distinguish intent at a glance and helps the user see what kind of
+  // element is being targeted.
+  function tagColorFor(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button' || tag === 'a' || el.getAttribute('role') === 'button' || el.getAttribute('role') === 'link') return '#0a84ff';
+    if (tag === 'input' || tag === 'textarea' || el.getAttribute('role') === 'searchbox') return '#34c759';
+    if (tag === 'select') return '#ff9500';
+    if (el.isContentEditable) return '#af52de';
+    return '#ff3b30';
+  }
+
+  // State for the tag overlay. We keep both a live element map (so
+  // click_by_tag can resolve the actual element) and a DOM container
+  // for the badges (so we can clear them in O(1)).
+  const TAGS_STATE = {
+    overlay: null,        // root <div> for all tag badges
+    styleEl: null,        // <style> with keyframes
+    nextId: 1,            // next tag number to assign
+    byTag: new Map(),     // tagId -> { el, rect, tag, text }
+    byNumber: new Map(),  // visible number (1..N) -> tagId, for stable
+                          // renumbering when elements scroll out
+    scrollHandler: null,
+    resizeHandler: null,
+  };
+
+  function ensureTagsOverlay() {
+    if (TAGS_STATE.overlay && document.documentElement.contains(TAGS_STATE.overlay)) return;
+    // Container is position:fixed at top-left with pointer-events:none
+    // so it never blocks clicks on the actual page.
+    const root = document.createElement('div');
+    root.id = '__agent_browser_tags_overlay__';
+    root.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647';
+    (document.documentElement || document.body).appendChild(root);
+    TAGS_STATE.overlay = root;
+
+    if (!TAGS_STATE.styleEl) {
+      const s = document.createElement('style');
+      s.id = '__agent_browser_tags_style__';
+      s.textContent = [
+        // The badge itself: small pill, top-left of the element,
+        // with a colored background that matches the element type.
+        '.__agent_tag_badge__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483647 !important;',
+        '  display: inline-flex !important;',
+        '  align-items: center !important;',
+        '  justify-content: center !important;',
+        '  min-width: 22px !important;',
+        '  height: 22px !important;',
+        '  padding: 0 6px !important;',
+        '  border-radius: 11px !important;',
+        '  background: var(--__agent_tag_color__, #0a84ff) !important;',
+        '  color: #fff !important;',
+        '  font: 600 11px/1 -apple-system, BlinkMacSystemFont, sans-serif !important;',
+        '  font-feature-settings: "tnum" 1 !important;',
+        '  letter-spacing: 0.2px !important;',
+        '  box-shadow: 0 1px 3px rgba(0,0,0,0.35), 0 0 0 1.5px #fff !important;',
+        '  pointer-events: auto !important;',
+        '  cursor: pointer !important;',
+        '  transform-origin: top left !important;',
+        '  transition: transform 0.12s ease, box-shadow 0.12s ease !important;',
+        '  user-select: none !important;',
+        '  font-family: ui-monospace, Menlo, monospace !important;',
+        '}',
+        '.__agent_tag_badge__::before {',
+        '  content: "#" !important;',
+        '  opacity: 0.65 !important;',
+        '  margin-right: 2px !important;',
+        '  font-weight: 500 !important;',
+        '}',
+        '.__agent_tag_badge__:hover {',
+        '  transform: scale(1.25) !important;',
+        '  box-shadow: 0 2px 8px rgba(0,0,0,0.45), 0 0 0 2px #fff !important;',
+        '}',
+        '.__agent_tag_badge__.is-hovered {',
+        '  transform: scale(1.35) !important;',
+        '  box-shadow: 0 0 0 3px rgba(255,255,255,0.9), 0 0 14px var(--__agent_tag_color__, #0a84ff) !important;',
+        '}',
+        '.__agent_tag_badge__.is-clicked {',
+        '  animation: __agent_tag_click__ 0.45s ease-out !important;',
+        '}',
+        '@keyframes __agent_tag_click__ {',
+        '  0%   { transform: scale(1);   box-shadow: 0 0 0 0   rgba(255,255,255,0.9), 0 0 0 0   var(--__agent_tag_color__, #0a84ff); }',
+        '  40%  { transform: scale(1.6); box-shadow: 0 0 0 4px rgba(255,255,255,0.6), 0 0 0 14px transparent; }',
+        '  100% { transform: scale(1);   box-shadow: 0 0 0 0   rgba(255,255,255,0),   0 0 0 0   transparent; }',
+        '}',
+        // A subtle outline drawn around the element itself, so it's
+        // obvious which element the tag points at even at a glance.
+        '.__agent_tag_outline__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483646 !important;',
+        '  pointer-events: none !important;',
+        '  border: 2px dashed var(--__agent_tag_color__, #0a84ff) !important;',
+        '  border-radius: 3px !important;',
+        '  opacity: 0 !important;',
+        '  transition: opacity 0.15s ease !important;',
+        '}',
+        '.__agent_tag_badge__:hover + .__agent_tag_outline__,',
+        '.__agent_tag_badge__.is-hovered + .__agent_tag_outline__ {',
+        '  opacity: 0.85 !important;',
+        '}',
+        '.__agent_tag_outline__.is-hovered {',
+        '  opacity: 0.95 !important;',
+        '  border-style: solid !important;',
+        '}',
+        // Tooltip on hover: shows the element's text/aria so the
+        // model can preview what it would click.
+        '.__agent_tag_tooltip__ {',
+        '  position: fixed !important;',
+        '  z-index: 2147483647 !important;',
+        '  background: rgba(20,20,22,0.96) !important;',
+        '  color: #fff !important;',
+        '  font: 12px/1.4 -apple-system, sans-serif !important;',
+        '  padding: 6px 10px !important;',
+        '  border-radius: 6px !important;',
+        '  max-width: 320px !important;',
+        '  pointer-events: none !important;',
+        '  box-shadow: 0 4px 12px rgba(0,0,0,0.4) !important;',
+        '  opacity: 0 !important;',
+        '  transition: opacity 0.12s ease !important;',
+        '  white-space: pre-wrap !important;',
+        '  word-break: break-word !important;',
+        '}',
+        '.__agent_tag_badge__:hover ~ .__agent_tag_tooltip__,',
+        '.__agent_tag_badge__.is-hovered ~ .__agent_tag_tooltip__ {',
+        '  opacity: 1 !important;',
+        '}',
+      ].join('\n');
+      (document.documentElement || document.body).appendChild(s);
+      TAGS_STATE.styleEl = s;
+    }
+  }
+
+  function describeInteractive(el) {
+    const rect = el.getBoundingClientRect();
+    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || '').toString().slice(0, 80).trim();
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || undefined,
+      role: el.getAttribute('role') || undefined,
+      type: el.getAttribute && el.getAttribute('type') || undefined,
+      text: text || undefined,
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        w: Math.round(rect.width), h: Math.round(rect.height),
+        cx: Math.round(rect.x + rect.width / 2),
+        cy: Math.round(rect.y + rect.height / 2),
+      },
+    };
+  }
+
+  function isVisibleInteractive(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return false;
+    if (rect.bottom < 0 || rect.right < 0) return false;
+    if (rect.top > window.innerHeight + 200) return false;
+    if (rect.left > window.innerWidth + 200) return false;
+    const cs = window.getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || cs.pointerEvents === 'none') return false;
+    if (parseFloat(cs.opacity || '1') === 0) return false;
+    return true;
+  }
+
+  // Repaint all tag badges based on current element positions. Called
+  // initially and on every scroll/resize. This keeps tags glued to
+  // their elements even when the layout shifts.
+  function repaintTags() {
+    if (!TAGS_STATE.overlay) return;
+    TAGS_STATE.byNumber.clear();
+    // Walk the element map in assignment order; re-measure each.
+    let n = 1;
+    for (const [tagId, entry] of TAGS_STATE.byTag) {
+      const el = entry.el;
+      const badge = entry.badge;
+      const outline = entry.outline;
+      if (!el || !document.body.contains(el)) {
+        // Element was removed from the DOM; mark stale and skip.
+        entry.stale = true;
+        continue;
+      }
+      if (!isVisibleInteractive(el)) {
+        // Scrolled out of view or hidden; fade the badge so the
+        // numbering stays in viewport order.
+        badge.style.opacity = '0.18';
+        continue;
+      }
+      badge.style.opacity = '1';
+      const rect = el.getBoundingClientRect();
+      // Position the badge just inside the top-left corner of the
+      // element. Clamp so it doesn't fall off-screen on tiny elements.
+      const bx = Math.max(0, Math.round(rect.x - 1));
+      const by = Math.max(0, Math.round(rect.y - 1));
+      badge.style.left = bx + 'px';
+      badge.style.top  = by + 'px';
+      if (outline) {
+        outline.style.left = bx + 'px';
+        outline.style.top  = by + 'px';
+        outline.style.width  = Math.max(4, Math.round(rect.width)) + 'px';
+        outline.style.height = Math.max(4, Math.round(rect.height)) + 'px';
+      }
+      entry.rect = {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        w: Math.round(rect.width), h: Math.round(rect.height),
+        cx: Math.round(rect.x + rect.width / 2),
+        cy: Math.round(rect.y + rect.height / 2),
+      };
+      // Reassign the visible number 1..N in viewport order.
+      badge.textContent = String(n);
+      badge.dataset.num = String(n);
+      TAGS_STATE.byNumber.set(n, tagId);
+      n++;
+    }
+  }
+
+  // Bind scroll/resize listeners (idempotent).
+  function ensureTagsListeners() {
+    if (TAGS_STATE.scrollHandler) return;
+    TAGS_STATE.scrollHandler = () => repaintTags();
+    TAGS_STATE.resizeHandler = () => repaintTags();
+    window.addEventListener('scroll',     TAGS_STATE.scrollHandler, { passive: true, capture: true });
+    window.addEventListener('resize',     TAGS_STATE.resizeHandler, { passive: true });
+    document.addEventListener('scroll',   TAGS_STATE.scrollHandler, { passive: true, capture: true });
+    // Mutation observer: re-tag newly-added interactive elements.
+    const mo = new MutationObserver(() => {
+      if (!TAGS_STATE.overlay) return;
+      // Cheap heuristic: if any new node matches the selector, do
+      // a full re-scan. This is rare during agent operation.
+      for (const n of mo.takeRecords()) {/* drain */}
+    });
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+    TAGS_STATE._mo = mo;
+  }
+
+  function clearTags() {
+    if (TAGS_STATE.overlay && TAGS_STATE.overlay.parentNode) {
+      TAGS_STATE.overlay.parentNode.removeChild(TAGS_STATE.overlay);
+    }
+    if (TAGS_STATE.styleEl && TAGS_STATE.styleEl.parentNode) {
+      TAGS_STATE.styleEl.parentNode.removeChild(TAGS_STATE.styleEl);
+    }
+    TAGS_STATE.overlay = null;
+    TAGS_STATE.styleEl = null;
+    TAGS_STATE.byTag.clear();
+    TAGS_STATE.byNumber.clear();
+    TAGS_STATE.nextId = 1;
+    if (TAGS_STATE.scrollHandler) {
+      window.removeEventListener('scroll', TAGS_STATE.scrollHandler, { capture: true });
+      window.removeEventListener('resize', TAGS_STATE.resizeHandler);
+      document.removeEventListener('scroll', TAGS_STATE.scrollHandler, { capture: true });
+      TAGS_STATE.scrollHandler = null;
+      TAGS_STATE.resizeHandler = null;
+    }
+    if (TAGS_STATE._mo) {
+      TAGS_STATE._mo.disconnect();
+      TAGS_STATE._mo = null;
+    }
+  }
+
+  // Build the visual mousing overlay. Returns a flat list of
+  // { tagId, n, ...describe } so the caller can pick a target.
+  function tagInteractiveElements(opts) {
+    opts = opts || {};
+    const max = opts.max || 200;
+    clearTags();
+    ensureTagsOverlay();
+    ensureTagsListeners();
+
+    // Collect candidates, dedup, and filter to visible.
+    const seen = new Set();
+    const els = [];
+    document.querySelectorAll(INTERACTIVE_SELECTOR).forEach(el => {
+      // Skip elements that are inside a closed <details> or have
+      // display:none on an ancestor (isVisibleInteractive catches
+      // the element itself; this catches ancestors cheaply).
+      if (el.closest('[hidden],[aria-hidden="true"]')) return;
+      if (!isVisibleInteractive(el)) return;
+      if (seen.has(el)) return;
+      seen.add(el);
+      els.push(el);
+      if (els.length >= max) return;
+    });
+    // Also descend into open shadow roots (YouTube, GitHub do this).
+    function collectShadows(root) {
+      if (!root || !root.querySelectorAll) return;
+      root.querySelectorAll('*').forEach(el => {
+        if (el.shadowRoot) {
+          try {
+            el.shadowRoot.querySelectorAll(INTERACTIVE_SELECTOR).forEach(inner => {
+              if (els.length >= max) return;
+              if (seen.has(inner)) return;
+              if (!isVisibleInteractive(inner)) return;
+              seen.add(inner);
+              els.push(inner);
+            });
+            collectShadows(el.shadowRoot);
+          } catch {}
+        }
+      });
+    }
+    collectShadows(document);
+
+    const out = [];
+    els.forEach((el) => {
+      const tagId = TAGS_STATE.nextId++;
+      const color = tagColorFor(el);
+      // The badge: small pill, top-left of the element.
+      const badge = document.createElement('div');
+      badge.className = '__agent_tag_badge__';
+      badge.dataset.tagId = String(tagId);
+      badge.style.setProperty('--__agent_tag_color__', color);
+      badge.textContent = '?';
+      // The outline: dashed border around the element itself.
+      const outline = document.createElement('div');
+      outline.className = '__agent_tag_outline__';
+      outline.style.setProperty('--__agent_tag_color__', color);
+      // Tooltip on hover.
+      const tip = document.createElement('div');
+      tip.className = '__agent_tag_tooltip__';
+      const desc = describeInteractive(el);
+      const tipText = [desc.tag, desc.text, desc.role && 'role=' + desc.role].filter(Boolean).join(' · ');
+      tip.textContent = tipText || desc.tag;
+      badge.addEventListener('mouseenter', () => {
+        badge.classList.add('is-hovered');
+        outline.classList.add('is-hovered');
+        if (!el.matches(':hover')) {
+          try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+        }
+      });
+      badge.addEventListener('mouseleave', () => {
+        badge.classList.remove('is-hovered');
+        outline.classList.remove('is-hovered');
+      });
+      // Clicking the badge does a real click on the element. This
+      // is the "visual mousing" UX: see the tag, click it, the
+      // page reacts. Also a handy demo / debug affordance.
+      badge.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        badge.classList.add('is-clicked');
+        setTimeout(() => badge.classList.remove('is-clicked'), 500);
+        const r = el.getBoundingClientRect();
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+        // Trust the click by reusing the synthetic-click path.
+        syntheticClickAt(cx, cy);
+        showRipple(cx, cy);
+      });
+
+      TAGS_STATE.overlay.appendChild(badge);
+      TAGS_STATE.overlay.appendChild(outline);
+      TAGS_STATE.overlay.appendChild(tip);
+
+      TAGS_STATE.byTag.set(tagId, { el, badge, outline, tip, desc });
+      out.push(Object.assign({ tagId }, desc));
+    });
+
+    // First paint assigns the 1..N numbers in viewport order.
+    repaintTags();
+    setBadgeStatus('Tagged ' + out.length, 'on');
+    return out;
+  }
+
+  // Resolve a visible number (1..N) to the current underlying tagId.
+  // Visible numbers are stable across scroll; underlying tagIds are
+  // the immutable assignment order. This indirection means the
+  // agent can re-tag without re-numbering.
+  function resolveByVisibleNumber(n) {
+    const tagId = TAGS_STATE.byNumber.get(n);
+    if (!tagId) return null;
+    const entry = TAGS_STATE.byTag.get(tagId);
+    if (!entry || entry.stale) return null;
+    return entry;
+  }
+
+  function clickByTag(input) {
+    const entry = resolveByVisibleNumber(Number(input));
+    if (!entry) return { ok: false, error: 'No element with tag #' + input };
+    const r = entry.el.getBoundingClientRect();
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    try { entry.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+    // Animate the badge so the user sees what was clicked.
+    entry.badge.classList.add('is-clicked');
+    setTimeout(() => entry.badge.classList.remove('is-clicked'), 500);
+    const res = syntheticClickAt(cx, cy);
+    showRipple(cx, cy);
+    return Object.assign({ ok: true, tagId: entry.tagId, num: input }, res);
+  }
+
+  function typeByTag(input, text) {
+    const entry = resolveByVisibleNumber(Number(input));
+    if (!entry) return { ok: false, error: 'No element with tag #' + input };
+    const r = entry.el.getBoundingClientRect();
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    try { entry.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+    entry.badge.classList.add('is-clicked');
+    setTimeout(() => entry.badge.classList.remove('is-clicked'), 500);
+    const res = syntheticTypeAt(cx, cy, text || '');
+    showRipple(cx, cy);
+    return Object.assign({ ok: true, tagId: entry.tagId, num: input }, res);
+  }
+
+  function hoverByTag(input) {
+    const entry = resolveByVisibleNumber(Number(input));
+    if (!entry) return { ok: false, error: 'No element with tag #' + input };
+    const r = entry.el.getBoundingClientRect();
+    try { entry.el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch {}
+    entry.badge.classList.add('is-hovered');
+    entry.outline.classList.add('is-hovered');
+    // Dispatch pointer/mouseenter on the target so any hover-driven
+    // UI (tooltips, dropdowns) reacts.
+    const events = ['pointerover', 'pointerenter', 'mouseover', 'mouseenter'];
+    for (const t of events) {
+      try {
+        entry.el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+      } catch {}
+    }
+    // Repaint to bring the target into the visible-number ordering.
+    setTimeout(() => repaintTags(), 50);
+    return { ok: true, tagId: entry.tagId, num: input, rect: entry.rect };
+  }
+
+  // ------------------------------------------------------------------
   // Message handling
   // ------------------------------------------------------------------
   function reply(sendResponse, value) {
@@ -383,6 +854,46 @@
           }
           case 'PING': {
             reply(sendResponse, { ok: true, ready: true, url: location.href });
+            break;
+          }
+          case 'TAG_ELEMENTS': {
+            // Visual mousing tool: paint numbered tags on every
+            // interactive element. Returns a flat list of { tagId,
+            // num, tag, text, rect, ... } that the agent can pick
+            // from by either the immutable tagId or the stable
+            // visible number (1..N, re-assigned on scroll).
+            const list = tagInteractiveElements(msg.options || {});
+            reply(sendResponse, { ok: true, count: list.length, elements: list });
+            break;
+          }
+          case 'CLICK_BY_TAG': {
+            reply(sendResponse, clickByTag(msg.num));
+            break;
+          }
+          case 'TYPE_BY_TAG': {
+            reply(sendResponse, typeByTag(msg.num, msg.text || ''));
+            break;
+          }
+          case 'HOVER_BY_TAG': {
+            reply(sendResponse, hoverByTag(msg.num));
+            break;
+          }
+          case 'CLEAR_TAGS': {
+            clearTags();
+            reply(sendResponse, { ok: true });
+            break;
+          }
+          case 'LIST_TAGS': {
+            // Re-emit the current tag list (with current rects)
+            // without re-tagging. Useful for re-grounding the agent
+            // after scroll.
+            const out = [];
+            for (const [n, tagId] of TAGS_STATE.byNumber) {
+              const entry = TAGS_STATE.byTag.get(tagId);
+              if (!entry || entry.stale) continue;
+              out.push(Object.assign({ tagId, num: n }, entry.desc, { rect: entry.rect }));
+            }
+            reply(sendResponse, { ok: true, count: out.length, elements: out });
             break;
           }
           default:

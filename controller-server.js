@@ -256,6 +256,10 @@ const KNOWN_ACTIONS = new Set([
   'click', 'type', 'scroll', 'navigate', 'capture_state', 'screenshot',
   'inspect', 'evaluate', 'tabs', 'open', 'close', 'switch_tab',
   'set_active_tab', 'set_status', 'wait', 'find_tab', 'press_key', 'finish',
+  // Visual mousing tool: numbered element tags. These are routed
+  // to the content script and don't require chrome.debugger.
+  'tag_elements', 'click_by_tag', 'type_by_tag', 'hover_by_tag',
+  'clear_tags', 'list_tags',
 ]);
 function validateAction(body) {
   if (!body || typeof body !== 'object') {
@@ -292,10 +296,7 @@ async function handleHttp(req, res) {
         clients: clients.size,
         version: '1.0.0',
         port: PORT,
-        actions: [
-          'click', 'type', 'scroll', 'navigate', 'capture_state', 'screenshot',
-          'inspect', 'evaluate', 'tabs', 'open', 'close', 'switch_tab', 'wait',
-        ],
+        actions: Array.from(KNOWN_ACTIONS),
       });
     }
     if (url.pathname === '/action' && req.method === 'POST') {
