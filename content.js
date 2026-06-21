@@ -336,6 +336,280 @@
     return { ok: true, start: s, end: e };
   }
 
+  // ------------------------------------------------------------------
+  // Visual mousing tool: extended affordances
+  //
+  // These round out the mousing tool beyond the basic tag/crosshair
+  // /drag set: the agent can now (a) move the real cursor, (b) ask
+  // "what is at this pixel?", (c) preview a click without firing
+  // one, (d) overlay a coordinate grid for pixel-precise work,
+  // (e) highlight the current focus + text selection, (f) filter
+  // and freeze the tag system, and (g) flash a ring around a tag
+  // for immediate visual confirmation.
+  //
+  // All state lives on `window.__agent*` so the popup / background
+  // can introspect and (where useful) re-bind event listeners from
+  // outside the original IIFE.
+  // ------------------------------------------------------------------
+
+  // Crosshair state handle on window. Move-to-publish lets
+  // the relay layer introspect the last-known crosshair position
+  // from the background script (via evaluate) without re-running
+  // the page's mousemove listener. The actual visual is driven
+  // by CROSS_STATE above.
+  if (!window.__agentCrosshair) {
+    window.__agentCrosshair = { injected: false, x: 0, y: 0, _onMove: null };
+  }
+  window.__agentCrosshair.injected = true;
+
+  // elementInfo — return the full picture of the element at a
+  // point so the agent can decide what to do with it.
+  function elementInfo({ x, y }) {
+    const r = { x, y, found: false };
+    let el;
+    try { el = document.elementFromPoint(x, y); } catch (e) { r.error = String(e); return r; }
+    if (!el) { r.reason = 'no element at point'; return r; }
+    r.found = true;
+    const rect = el.getBoundingClientRect();
+    r.tag = el.tagName.toLowerCase();
+    r.id = el.id || null;
+    r.className = (typeof el.className === 'string' ? el.className : '') || null;
+    r.text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').toString().slice(0, 200).trim() || null;
+    r.placeholder = el.getAttribute('placeholder') || null;
+    r.role = el.getAttribute('role') || null;
+    r.href = el.href || null;
+    r.type = (el.getAttribute && el.getAttribute('type')) || null;
+    r.value = (el.value != null ? String(el.value) : null);
+    r.rect = { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height), cx: Math.round(rect.x + rect.width/2), cy: Math.round(rect.y + rect.height/2) };
+    const cs = getComputedStyle(el);
+    r.style = { zIndex: cs.zIndex, position: cs.position, pointerEvents: cs.pointerEvents, visibility: cs.visibility, display: cs.display, opacity: cs.opacity };
+    r.contentEditable = !!el.isContentEditable;
+    r.focused = document.activeElement === el;
+    // Walk up to find the nearest clickable ancestor.
+    let target = el, interactiveReason = null, depth = 0;
+    const isClickable = (n) => {
+      if (!n) return null;
+      const t = n.tagName;
+      if (t === 'BUTTON' || t === 'A' || t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return 'tag:' + t;
+      if (n.getAttribute && n.getAttribute('role') === 'button') return 'role:button';
+      if (n.onclick) return 'onclick';
+      if (n.style && n.style.cursor === 'pointer') return 'cursor:pointer';
+      return null;
+    };
+    while (target && depth < 8) {
+      const why = isClickable(target);
+      if (why) { interactiveReason = why; break; }
+      target = target.parentElement;
+      depth++;
+    }
+    r.clickable = !!interactiveReason;
+    r.clickReason = interactiveReason;
+    r.clickTarget = target && target !== el ? { tag: target.tagName.toLowerCase(), id: target.id || null, text: (target.innerText || target.value || '').toString().slice(0, 100).trim() || null } : null;
+    r.clickTargetIsSelf = target === el;
+    r.depth = depth;
+    return r;
+  }
+
+  // hoverPreview — combine elementInfo with synthetic pointer/hover
+  // events and scroll-container detection. Lets the agent confirm
+  // "is this where I want to click?" before committing.
+  function hoverPreview({ x, y }) {
+    const info = elementInfo({ x, y });
+    const preview = { dispatched: [], hoverTarget: null, scrollable: null };
+    try {
+      const el = document.elementFromPoint(x, y);
+      if (el) {
+        preview.hoverTarget = el.tagName.toLowerCase() + (el.id ? '#' + el.id : '');
+        const events = ['pointerover', 'pointerenter', 'mouseover', 'mouseenter'];
+        for (const t of events) {
+          try { el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y })); preview.dispatched.push(t); } catch (e) {}
+        }
+      }
+    } catch (e) {}
+    try {
+      const el = document.elementFromPoint(x, y);
+      let n = el;
+      while (n) {
+        const cs = getComputedStyle(n);
+        if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && n.scrollHeight > n.clientHeight) {
+          preview.scrollable = n.tagName.toLowerCase() + (n.id ? '#' + n.id : '');
+          break;
+        }
+        n = n.parentElement;
+      }
+    } catch (e) {}
+    return Object.assign({}, info, { preview });
+  }
+
+  // moveMouse — update the crosshair readout to match an
+  // out-of-band mouse move. The page's mousemove listener usually
+  // fires too, but debugger-driven moves sometimes drop the event.
+  // We keep two paths: (a) push the new coords into the local
+  // CROSS_STATE so the visible crosshair moves with the OS cursor,
+  // and (b) update window.__agentCrosshair for any external
+  // consumer that introspects it.
+  function moveMouse({ x, y }) {
+    const xx = Math.round(Number(x));
+    const yy = Math.round(Number(y));
+    if (CROSS_STATE.el)     CROSS_STATE.el.style.left     = xx + 'px';
+    if (CROSS_STATE.el)     CROSS_STATE.el.style.top      = yy + 'px';
+    if (CROSS_STATE.dot)    CROSS_STATE.dot.style.left    = xx + 'px';
+    if (CROSS_STATE.dot)    CROSS_STATE.dot.style.top     = yy + 'px';
+    if (CROSS_STATE.readout) {
+      try {
+        const el = document.elementFromPoint(xx, yy);
+        const tag = el ? el.tagName.toLowerCase() : '-';
+        const eid = el && el.id ? '#' + el.id : '';
+        const cls = el && el.className && typeof el.className === 'string' && el.className
+          ? '.' + el.className.split(/\s+/).filter(Boolean).slice(0, 2).join('.') : '';
+        CROSS_STATE.readout.innerHTML = 'x:<b>' + xx + '</b> y:<b>' + yy + '</b><span class="__agent_crosshair_target__">' + tag + eid + cls + '</span>';
+      } catch (e) {}
+    }
+    if (window.__agentCrosshair) {
+      window.__agentCrosshair.x = xx;
+      window.__agentCrosshair.y = yy;
+    }
+    return { ok: true, x: xx, y: yy };
+  }
+
+  // showGrid / hideGrid — 50px coordinate grid overlay for
+  // pixel-precise alignment. Combined with the crosshair, the
+  // agent can reason about exact coordinates on screenshots.
+  function showGrid({ spacing } = {}) {
+    const sp = spacing || 50;
+    let s = document.getElementById('__agent_browser_grid_style__');
+    if (!s) {
+      s = document.createElement('style');
+      s.id = '__agent_browser_grid_style__';
+      (document.documentElement || document.body).appendChild(s);
+    }
+    s.textContent = '.__agent_browser_grid__ { position: fixed !important; left: 0 !important; top: 0 !important; width: 100vw !important; height: 100vh !important; pointer-events: none !important; z-index: 2147483646 !important; background-image: linear-gradient(to right, rgba(10,132,255,0.10) 1px, transparent 1px), linear-gradient(to bottom, rgba(10,132,255,0.10) 1px, transparent 1px) !important; background-size: ' + sp + 'px ' + sp + 'px !important; }';
+    if (!document.getElementById('__agent_browser_grid__')) {
+      const g = document.createElement('div');
+      g.id = '__agent_browser_grid__';
+      g.className = '__agent_browser_grid__';
+      (document.documentElement || document.body).appendChild(g);
+    }
+    return { ok: true, spacing: sp };
+  }
+  function hideGrid() {
+    ['__agent_browser_grid__', '__agent_browser_grid_style__'].forEach(id => {
+      const n = document.getElementById(id); if (n) n.remove();
+    });
+    return { ok: true };
+  }
+
+  // showSelection / hideSelection — highlight activeElement with
+  // an orange focus ring + draw blue rectangles around the
+  // current text selection. Auto-updates on focus and selection
+  // changes so the bracket always matches reality.
+  const SEL_STATE = { active: false, styleEl: null };
+  function paintSelection() {
+    // Remove any old rings first.
+    document.querySelectorAll('.__agent_browser_focus_ring__').forEach(n => n.remove());
+    if (!SEL_STATE.active) return;
+    // Active element ring.
+    try {
+      const a = document.activeElement;
+      if (a && a !== document.body && a.tagName) {
+        const r = a.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          const ring = document.createElement('div');
+          ring.className = '__agent_browser_focus_ring__';
+          ring.style.left = r.left + 'px';
+          ring.style.top  = r.top + 'px';
+          ring.style.width  = r.width + 'px';
+          ring.style.height = r.height + 'px';
+          (document.documentElement || document.body).appendChild(ring);
+        }
+      }
+    } catch (e) {}
+    // Text selection brackets.
+    try {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && !sel.isCollapsed) {
+        const range = sel.getRangeAt(0);
+        const rects = range.getClientRects();
+        for (let i = 0; i < rects.length; i++) {
+          const rr = rects[i];
+          if (rr.width === 0 || rr.height === 0) continue;
+          const hl = document.createElement('div');
+          hl.className = '__agent_browser_focus_ring__';
+          hl.style.left = rr.left + 'px';
+          hl.style.top  = rr.top + 'px';
+          hl.style.width  = rr.width + 'px';
+          hl.style.height = rr.height + 'px';
+          hl.style.borderColor = '#0a84ff';
+          hl.style.boxShadow = '0 0 0 2px rgba(10,132,255,0.3) !important';
+          (document.documentElement || document.body).appendChild(hl);
+        }
+      }
+    } catch (e) {}
+  }
+  function showSelection() {
+    if (!SEL_STATE.styleEl) {
+      const s = document.createElement('style');
+      s.id = '__agent_browser_selection_style__';
+      s.textContent = '.__agent_browser_focus_ring__ { position: fixed !important; z-index: 2147483646 !important; pointer-events: none !important; border: 2px solid #ff9500 !important; border-radius: 4px !important; box-shadow: 0 0 0 2px rgba(255,149,0,0.3) !important; transition: all 0.12s ease !important; }';
+      (document.documentElement || document.body).appendChild(s);
+      SEL_STATE.styleEl = s;
+    }
+    SEL_STATE.active = true;
+    if (!window.__agentSelHandlers) {
+      window.__agentSelHandlers = true;
+      window.addEventListener('focusin',  paintSelection, true);
+      window.addEventListener('focusout', paintSelection, true);
+      window.addEventListener('selectionchange', paintSelection);
+    }
+    paintSelection();
+    return { ok: true, activeElement: document.activeElement && document.activeElement.tagName };
+  }
+  function hideSelection() {
+    SEL_STATE.active = false;
+    document.querySelectorAll('.__agent_browser_focus_ring__').forEach(n => n.remove());
+    if (SEL_STATE.styleEl) { SEL_STATE.styleEl.remove(); SEL_STATE.styleEl = null; }
+    return { ok: true };
+  }
+
+  // setTagFilter — pause re-tagging on scroll (freeze), or only
+  // show certain element types (filter). Pure-state mutation; no
+  // repaint needed because repaintTags() already consults
+  // TAGS_STATE.frozen / TAGS_STATE.filter.
+  function setTagFilter({ types = null, freeze = false } = {}) {
+    if (typeof freeze === 'boolean') TAGS_STATE.frozen = freeze;
+    if (Array.isArray(types)) TAGS_STATE.filter = new Set(types);
+    else if (types === null) TAGS_STATE.filter = null;
+    return { ok: true, frozen: !!TAGS_STATE.frozen, filter: TAGS_STATE.filter ? Array.from(TAGS_STATE.filter) : null };
+  }
+
+  // flashTag — paint a pulsing ring around the element with the
+  // given visible tag number. Pairs with clickByTag so the model
+  // gets immediate visual confirmation of what it hit.
+  function flashTag({ num, color } = {}) {
+    const c = color || '#34c759';
+    // Find the entry by visible number.
+    let entry = null;
+    for (const [n, tagId] of TAGS_STATE.byNumber) {
+      if (n === num) { entry = TAGS_STATE.byTag.get(tagId); break; }
+    }
+    if (!entry) return { ok: false, error: 'no tag #' + num };
+    // Use the live rect, not the cached one — the page may have
+    // scrolled or reflowed since the tag was painted.
+    const rect = entry.el.getBoundingClientRect();
+    if (!document.getElementById('__agent_browser_tag_focus_style__')) {
+      const s = document.createElement('style');
+      s.id = '__agent_browser_tag_focus_style__';
+      s.textContent = '@keyframes agentTagFlash { 0% { transform: scale(0.8); opacity: 0.8; } 50% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(1); opacity: 0; } }';
+      (document.documentElement || document.body).appendChild(s);
+    }
+    const ring = document.createElement('div');
+    ring.className = '__agent_browser_tag_focus__';
+    ring.style.cssText = 'position:fixed !important;z-index:2147483646 !important;pointer-events:none !important;border:3px solid ' + c + ' !important;border-radius:4px !important;left:' + (rect.left-3) + 'px !important;top:' + (rect.top-3) + 'px !important;width:' + (rect.width+6) + 'px !important;height:' + (rect.height+6) + 'px !important;animation:agentTagFlash 0.6s ease-out forwards !important;';
+    (document.documentElement || document.body).appendChild(ring);
+    setTimeout(() => ring.remove(), 700);
+    return { ok: true, num, rect: { x: rect.left, y: rect.top, w: rect.width, h: rect.height } };
+  }
+
   // Red anchor dot — fires on every click action. High-contrast,
   // z-index 2147483647, !important, so it survives on hostile
   // pages. This is the "where the agent clicked" indicator
@@ -626,6 +900,10 @@
                           // renumbering when elements scroll out
     scrollHandler: null,
     resizeHandler: null,
+    // Optional: pause re-tagging on scroll (freeze) or only show
+    // certain element types (filter). Set by setTagFilter.
+    frozen: false,
+    filter: null,         // null = no filter, otherwise Set of tag names
   };
 
   function ensureTagsOverlay() {
@@ -772,6 +1050,10 @@
   // their elements even when the layout shifts.
   function repaintTags() {
     if (!TAGS_STATE.overlay) return;
+    // Frozen mode: pause re-tagging on scroll/resize. The model
+    // called SET_TAG_FILTER with freeze=true to keep tag numbers
+    // stable while it works through a list.
+    if (TAGS_STATE.frozen) return;
     TAGS_STATE.byNumber.clear();
     // Walk the element map in assignment order; re-measure each.
     let n = 1;
@@ -905,8 +1187,19 @@
     }
     collectShadows(document);
 
+    // Optional: respect the type filter set via SET_TAG_FILTER.
+    // Filtering at paint time (rather than at scan time) keeps the
+    // number of underlying elements constant; just hide the ones
+    // the model has filtered out.
+    const passesFilter = (el) => {
+      if (!TAGS_STATE.filter) return true;
+      const t = el.tagName.toLowerCase();
+      return TAGS_STATE.filter.has(t);
+    };
+
     const out = [];
     els.forEach((el) => {
+      if (!passesFilter(el)) return;
       const tagId = TAGS_STATE.nextId++;
       const color = tagColorFor(el);
       // The badge: small pill, top-left of the element.
@@ -1166,6 +1459,45 @@
               out.push(Object.assign({ tagId, num: n }, entry.desc, { rect: entry.rect }));
             }
             reply(sendResponse, { ok: true, count: out.length, elements: out });
+            break;
+          }
+          // ---- Visual mousing tool: extended affordances ----
+          case 'MOVE_MOUSE': {
+            // Drives the crosshair readout to match an out-of-band
+            // OS-level mouse move (chrome.debugger.Input.dispatchMouseEvent).
+            reply(sendResponse, moveMouse({ x: Number(msg.x), y: Number(msg.y) }));
+            break;
+          }
+          case 'ELEMENT_INFO': {
+            reply(sendResponse, elementInfo({ x: Number(msg.x), y: Number(msg.y) }));
+            break;
+          }
+          case 'HOVER_PREVIEW': {
+            reply(sendResponse, hoverPreview({ x: Number(msg.x), y: Number(msg.y) }));
+            break;
+          }
+          case 'SHOW_GRID': {
+            reply(sendResponse, showGrid({ spacing: msg.spacing ? Number(msg.spacing) : 50 }));
+            break;
+          }
+          case 'HIDE_GRID': {
+            reply(sendResponse, hideGrid());
+            break;
+          }
+          case 'SHOW_SELECTION': {
+            reply(sendResponse, showSelection());
+            break;
+          }
+          case 'HIDE_SELECTION': {
+            reply(sendResponse, hideSelection());
+            break;
+          }
+          case 'SET_TAG_FILTER': {
+            reply(sendResponse, setTagFilter({ types: msg.types, freeze: msg.freeze }));
+            break;
+          }
+          case 'FLASH_TAG': {
+            reply(sendResponse, flashTag({ num: Number(msg.num), color: msg.color }));
             break;
           }
           default:

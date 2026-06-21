@@ -262,6 +262,12 @@ const KNOWN_ACTIONS = new Set([
   'clear_tags', 'list_tags',
   // Coordinate crosshair + drag visualization
   'show_crosshair', 'hide_crosshair', 'start_drag', 'update_drag', 'end_drag',
+  // Visual mousing tool: extended affordances (move-mouse sync,
+  // pixel inspect, hover preview, coordinate grid, focus/selection
+  // highlight, tag filter, tag flash).
+  'move_mouse', 'element_info', 'hover_preview',
+  'show_grid', 'hide_grid', 'show_selection', 'hide_selection',
+  'set_tag_filter', 'flash_tag',
 ]);
 function validateAction(body) {
   if (!body || typeof body !== 'object') {

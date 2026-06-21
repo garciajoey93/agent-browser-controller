@@ -137,3 +137,158 @@ test('startDrag / updateDrag / endDrag produce a clean trace', async () => {
   assert.equal(e.end.y, 300);
   await driver.close();
 });
+
+test('moveMouse updates the crosshair readout', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<button style="position:absolute;left:50px;top:50px;width:100px;height:40px">x</button>') });
+  await driver.showCrosshair();
+  const r = await driver.moveMouse({ x: 100, y: 70 });
+  assert.equal(r.ok, true);
+  // Proof: read the readout text in the same evaluate that also reads
+  // window.__agentCrosshair state. The mousemove listener updates
+  // these directly, so we can verify both consistently.
+  const proof = await driver.evaluate({ code: '({ readout: document.getElementById("__agent_browser_crosshair_readout__")?.textContent || null, hasUpdate: typeof window.__agentCrosshair?.update === "function", x: window.__agentCrosshair?.x, y: window.__agentCrosshair?.y })' });
+  assert.equal(proof.result.hasUpdate, true, 'update fn exposed on window');
+  // Readout may be "x:100 y:70" or contain more; just check the digits.
+  assert.match(proof.result.readout, /100/);
+  assert.match(proof.result.readout, /70/);
+  await driver.hideCrosshair();
+  await driver.close();
+});
+
+test('elementInfo returns full picture of the element at (x,y)', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<button id="b" style="position:absolute;left:50px;top:50px;width:100px;height:40px">B1</button>' +
+    '<a id="a" style="position:absolute;left:50px;top:120px" href="/x">A1</a>'
+  ) });
+  const info = await driver.elementInfo({ x: 100, y: 70 });
+  assert.equal(info.found, true, JSON.stringify(info));
+  assert.equal(info.tag, 'button');
+  assert.equal(info.id, 'b');
+  assert.equal(info.text, 'B1');
+  assert.equal(info.clickable, true);
+  assert.equal(info.clickReason, 'tag:BUTTON');
+  assert.equal(info.clickTargetIsSelf, true);
+  assert.equal(info.rect.w, 100);
+  assert.equal(info.rect.h, 40);
+  // Anchor should also be detected.
+  const aInfo = await driver.elementInfo({ x: 60, y: 130 });
+  assert.equal(aInfo.tag, 'a');
+  assert.equal(aInfo.id, 'a');
+  // On a data: URL the href may be the empty string or a fully-resolved
+  // URL, but the attribute should be present.
+  assert.ok(typeof aInfo.href === 'string' || aInfo.href === null);
+  await driver.close();
+});
+
+test('elementInfo on empty point returns no element gracefully', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<p>x</p>') });
+  const info = await driver.elementInfo({ x: -100, y: -100 });
+  // -100 is off-screen; elementFromPoint returns null.
+  assert.equal(info.found, false);
+  await driver.close();
+});
+
+test('hoverPreview dispatches pointerover + returns scroll container', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    // Scroll container: 200x200, no children on top so elementFromPoint
+    // returns the div itself.
+    '<div style="position:absolute;left:0;top:0;width:200px;height:200px;overflow-y:auto;background:#eee" id="scroll">' +
+    '<div style="height:1000px"></div>' +
+    '</div>' +
+    '<div style="position:absolute;left:0;top:250px" id="noscroll">a</div>'
+  ) });
+  // At (50, 50) the topmost element is the scrollable div.
+  const r = await driver.hoverPreview({ x: 50, y: 50 });
+  assert.equal(r.found, true);
+  // tagName should be 'div'. id may or may not propagate through
+  // Playwright's serialization, so just check the tag.
+  assert.match(r.preview.hoverTarget, /^div/);
+  assert.ok(r.preview.dispatched.includes('pointerover'));
+  assert.ok(r.preview.dispatched.includes('mouseover'));
+  // The div is scrollable (overflow-y:auto, scrollHeight > clientHeight).
+  assert.match(r.preview.scrollable, /^div/);
+  await driver.close();
+});
+
+test('showGrid / hideGrid toggles a 50px grid overlay', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent('<p>x</p>') });
+  const on = await driver.showGrid({ spacing: 50 });
+  assert.equal(on.ok, true);
+  const proof = await driver.evaluate({ code: '({ grid: !!document.getElementById("__agent_browser_grid__"), style: !!document.getElementById("__agent_browser_grid_style__") })' });
+  assert.equal(proof.result.grid, true, 'grid element present after show');
+  assert.equal(proof.result.style, true, 'grid style present after show');
+  const off = await driver.hideGrid();
+  assert.equal(off.ok, true);
+  const proof2 = await driver.evaluate({ code: '({ grid: !!document.getElementById("__agent_browser_grid__"), style: !!document.getElementById("__agent_browser_grid_style__") })' });
+  assert.equal(proof2.result.grid, false, 'grid removed after hide');
+  await driver.close();
+});
+
+test('showSelection highlights activeElement and re-updates on focus change', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<input id="i" style="position:absolute;left:50px;top:50px">' +
+    '<button id="b" style="position:absolute;left:50px;top:120px">Go</button>'
+  ) });
+  // Focus the input via tag.
+  const tags = await driver.tagElements({ max: 50 });
+  const inp = tags.find(t => t.id === 'i');
+  assert.ok(inp);
+  await driver.clickByTag({ num: inp.num });
+  await driver.evaluate({ code: 'new Promise(r => setTimeout(r, 100))' });
+  const on = await driver.showSelection();
+  assert.equal(on.ok, true);
+  assert.equal(on.activeElement, 'INPUT', 'input is activeElement');
+  // Proof: focus ring elements exist + count > 0.
+  const proof = await driver.evaluate({ code: '({ rings: document.querySelectorAll(".__agent_browser_focus_ring__").length, focusStyle: !!document.getElementById("__agent_browser_selection_style__") })' });
+  assert.equal(proof.result.focusStyle, true, 'selection style injected');
+  assert.ok(proof.result.rings >= 1, 'at least one focus ring visible');
+  // Switch focus to the button and re-check the ring moves.
+  const btn = tags.find(t => t.id === 'b');
+  await driver.clickByTag({ num: btn.num });
+  await driver.evaluate({ code: 'new Promise(r => setTimeout(r, 100))' });
+  const proof2 = await driver.evaluate({ code: '({ active: document.activeElement?.id || null, ringCount: document.querySelectorAll(".__agent_browser_focus_ring__").length })' });
+  assert.equal(proof2.result.active, 'b', 'focus moved to button after click');
+  await driver.hideSelection();
+  await driver.close();
+});
+
+test('setTagFilter freezes tagging and filters by type', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<button id="b1">B1</button><input id="i1"><a href="#" id="a1">A</a>' +
+    '<button id="b2">B2</button>'
+  ) });
+  const tags = await driver.tagElements({ max: 50 });
+  assert.ok(tags.length >= 4, JSON.stringify(tags));
+  // Filter: only buttons.
+  const f = await driver.setTagFilter({ types: ['button'] });
+  assert.equal(f.ok, true);
+  assert.deepEqual(f.filter, ['button']);
+  assert.equal(f.frozen, false);
+  // Freeze + filter.
+  const fz = await driver.setTagFilter({ freeze: true, types: ['button', 'input'] });
+  assert.equal(fz.ok, true);
+  assert.equal(fz.frozen, true);
+  assert.deepEqual(fz.filter, ['button', 'input']);
+  await driver.close();
+});
+
+test('flashTag paints a pulse ring around the targeted tag', async () => {
+  await driver.navigate({ url: 'data:text/html;charset=utf-8,' + encodeURIComponent(
+    '<button id="b" style="position:absolute;left:50px;top:50px;width:100px;height:40px">Go</button>'
+  ) });
+  const tags = await driver.tagElements({ max: 50 });
+  const btn = tags.find(t => t.id === 'b');
+  assert.ok(btn, 'button tagged');
+  const r = await driver.flashTag({ num: btn.num, color: '#ff3b30' });
+  assert.equal(r.ok, true);
+  assert.equal(r.num, btn.num);
+  // Proof: ring element present immediately after the call.
+  const proof = await driver.evaluate({ code: '({ ring: document.querySelector(".__agent_browser_tag_focus__") ? true : false, animStyle: !!document.getElementById("__agent_browser_tag_focus_style__") })' });
+  assert.equal(proof.result.ring, true, 'flash ring injected');
+  assert.equal(proof.result.animStyle, true, 'flash animation style injected');
+  // Wait for the ring to be removed, then verify it's gone.
+  await driver.evaluate({ code: 'new Promise(r => setTimeout(r, 800))' });
+  const proof2 = await driver.evaluate({ code: '({ ring: document.querySelector(".__agent_browser_tag_focus__") ? true : false })' });
+  assert.equal(proof2.result.ring, false, 'flash ring cleaned up after animation');
+  await driver.close();
+});

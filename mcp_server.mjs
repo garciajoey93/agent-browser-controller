@@ -148,6 +148,67 @@ const TOOLS = [
     description: 'End a drag visualization and return the start/end coordinates.',
     inputSchema: { type: 'object', properties: {} }
   },
+  // ---- Visual mousing tool: extended affordances ----
+  {
+    name: 'browser_move_mouse',
+    description: 'Update the crosshair readout to match an out-of-band mouse move. Pairs with the chrome.debugger-driven pointer (Input.dispatchMouseEvent) when the page mousemove event is dropped.',
+    inputSchema: { type: 'object', properties: {
+      x: { type: 'number', description: 'Viewport X coordinate (CSS pixels)' },
+      y: { type: 'number', description: 'Viewport Y coordinate (CSS pixels)' },
+    }, required: ['x', 'y'] }
+  },
+  {
+    name: 'browser_element_info',
+    description: 'Return the full picture of the element at (x, y): tag, id, classes, text, rect, computed style, focused state, and the nearest clickable ancestor. Lets the agent verify what a click would do before committing.',
+    inputSchema: { type: 'object', properties: {
+      x: { type: 'number' }, y: { type: 'number' },
+    }, required: ['x', 'y'] }
+  },
+  {
+    name: 'browser_hover_preview',
+    description: 'Combine elementInfo with synthetic pointerover/mouseover dispatch and scroll-container detection. The "is this where I want to click?" check.',
+    inputSchema: { type: 'object', properties: {
+      x: { type: 'number' }, y: { type: 'number' },
+    }, required: ['x', 'y'] }
+  },
+  {
+    name: 'browser_show_grid',
+    description: 'Show a coordinate grid overlay at the given spacing (default 50px) for pixel-precise alignment. Combined with the crosshair, lets the model reason about exact coordinates on screenshots.',
+    inputSchema: { type: 'object', properties: {
+      spacing: { type: 'number', description: 'Grid spacing in pixels (default 50)' },
+    } }
+  },
+  {
+    name: 'browser_hide_grid',
+    description: 'Hide the coordinate grid overlay.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'browser_show_selection',
+    description: 'Highlight the currently focused element and any active text selection with a visible bracket. Auto-updates on focus/selection changes.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'browser_hide_selection',
+    description: 'Hide the focus/selection highlight.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'browser_set_tag_filter',
+    description: 'Control the tag system: pause re-tagging on scroll (freeze=true) and/or only show certain element types (types=["button","a"]). The next tagElements call will respect the filter.',
+    inputSchema: { type: 'object', properties: {
+      types: { type: 'array', items: { type: 'string' }, description: 'Element tag names to keep (null = no filter)' },
+      freeze: { type: 'boolean', description: 'If true, pause re-tagging on scroll' },
+    } }
+  },
+  {
+    name: 'browser_flash_tag',
+    description: 'Paint a pulsing ring around the element with the given visible tag number. Pairs with clickByTag so the model gets immediate visual confirmation of what it just hit.',
+    inputSchema: { type: 'object', properties: {
+      num: { type: 'number', description: 'Visible tag number (1..N)' },
+      color: { type: 'string', description: 'Border color (default green #34c759)' },
+    }, required: ['num'] }
+  },
 ];
 
 async function handleRequest(req) {
@@ -192,6 +253,15 @@ async function handleRequest(req) {
         browser_start_drag:      () => driver.startDrag(args),
         browser_update_drag:    () => driver.updateDrag(args),
         browser_end_drag:       () => driver.endDrag(),
+        browser_move_mouse:     () => driver.moveMouse(args),
+        browser_element_info:   () => driver.elementInfo(args),
+        browser_hover_preview:  () => driver.hoverPreview(args),
+        browser_show_grid:      () => driver.showGrid(args),
+        browser_hide_grid:      () => driver.hideGrid(),
+        browser_show_selection: () => driver.showSelection(),
+        browser_hide_selection: () => driver.hideSelection(),
+        browser_set_tag_filter: () => driver.setTagFilter(args),
+        browser_flash_tag:      () => driver.flashTag(args),
       };
       const fn = map[name];
       if (!fn) throw new Error('Unknown tool: ' + name);

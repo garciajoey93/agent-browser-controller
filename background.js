@@ -744,6 +744,46 @@ async function executeAction(request) {
         const r = await sendToContent(tabId, { type: 'LIST_TAGS' });
         return r && r.ok ? r : (r || { ok: false, error: 'list_tags failed' });
       }
+      // ---- Visual mousing tool: extended affordances ----
+      case 'move_mouse': {
+        // Out-of-band cursor sync for the crosshair. Used when the
+        // agent drives the real OS pointer via chrome.debugger
+        // and the synthetic mousemove doesn't reach the page.
+        const r = await sendToContent(tabId, { type: 'MOVE_MOUSE', x: p.x, y: p.y });
+        return r && r.ok ? r : (r || { ok: false, error: 'move_mouse failed' });
+      }
+      case 'element_info': {
+        const r = await sendToContent(tabId, { type: 'ELEMENT_INFO', x: p.x, y: p.y });
+        return r && r.ok ? r : (r || { ok: false, error: 'element_info failed' });
+      }
+      case 'hover_preview': {
+        const r = await sendToContent(tabId, { type: 'HOVER_PREVIEW', x: p.x, y: p.y });
+        return r && r.ok ? r : (r || { ok: false, error: 'hover_preview failed' });
+      }
+      case 'show_grid': {
+        const r = await sendToContent(tabId, { type: 'SHOW_GRID', spacing: p.spacing });
+        return r && r.ok ? r : (r || { ok: false, error: 'show_grid failed' });
+      }
+      case 'hide_grid': {
+        const r = await sendToContent(tabId, { type: 'HIDE_GRID' });
+        return r && r.ok ? r : (r || { ok: false, error: 'hide_grid failed' });
+      }
+      case 'show_selection': {
+        const r = await sendToContent(tabId, { type: 'SHOW_SELECTION' });
+        return r && r.ok ? r : (r || { ok: false, error: 'show_selection failed' });
+      }
+      case 'hide_selection': {
+        const r = await sendToContent(tabId, { type: 'HIDE_SELECTION' });
+        return r && r.ok ? r : (r || { ok: false, error: 'hide_selection failed' });
+      }
+      case 'set_tag_filter': {
+        const r = await sendToContent(tabId, { type: 'SET_TAG_FILTER', types: p.types, freeze: p.freeze });
+        return r && r.ok ? r : (r || { ok: false, error: 'set_tag_filter failed' });
+      }
+      case 'flash_tag': {
+        const r = await sendToContent(tabId, { type: 'FLASH_TAG', num: p.num, color: p.color });
+        return r && r.ok ? r : (r || { ok: false, error: 'flash_tag failed' });
+      }
       default:
         return { ok: false, error: 'Unknown action: ' + action, errorCode: 'UNKNOWN_ACTION' };
     }

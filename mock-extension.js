@@ -291,6 +291,15 @@ async function execAction(req) {
       case 'start_drag':
       case 'update_drag':
       case 'end_drag':
+      case 'move_mouse':
+      case 'element_info':
+      case 'hover_preview':
+      case 'show_grid':
+      case 'hide_grid':
+      case 'show_selection':
+      case 'hide_selection':
+      case 'set_tag_filter':
+      case 'flash_tag':
         return { ok: false, error: action + ' is only supported by the real extension (content.js), not the mock' };
       default:
         return { ok: false, error: 'Unknown action: ' + action };
