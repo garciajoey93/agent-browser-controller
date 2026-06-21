@@ -72,6 +72,21 @@ const STATE = {
   reconnectTimer: null,
   activeTabId: null,
   log:         [],
+  agentChild:    null, // { process, runId } while an agent is running
+  agentRunId:    null,
+  agentTabId:    null,
+  agentGoal:     null,
+  // Agent-mode state. When an autonomous agent run is active:
+  //  - agentTabId is the tab the agent is working on (overrides
+  //    activeTabId for action routing)
+  //  - agentPinned=true means we ignore user tab switches so the
+  //    agent doesn't lose its work context
+  //  - agentRunId is the unique id the controller's agent
+  //    registry uses to track this run
+  agentTabId:  null,
+  agentPinned: false,
+  agentRunId:  null,
+  agentGoal:   null,
 };
 
 const LOG_LIMIT = 400;
@@ -461,7 +476,7 @@ async function executeAction(request) {
   }
   const { id, action, params } = request;
   let tabId = params && params.tabId;
-  if (!tabId) tabId = STATE.activeTabId;
+  if (!tabId) tabId = STATE.agentTabId || STATE.activeTabId;
   if (!tabId) {
     const t = await getActiveTab();
     tabId = t && t.id;
@@ -793,6 +808,26 @@ async function executeAction(request) {
 }
 
 // ------------------------------------------------------------------
+// Make sure the offscreen document is alive. MV3 service workers
+// can be torn down at any time, but the offscreen document keeps
+// a long-lived WebSocket + can spawn child processes.
+// Forward agent log lines + finished events from offscreen to the
+// popup so the user sees live progress.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || !msg.kind) return;
+  if (msg.kind === 'agent-log') {
+    // Push to popup if it's open.
+    try { chrome.runtime.sendMessage({ type: 'AGENT_LOG', level: msg.level, line: msg.line }); } catch {}
+    return;
+  }
+  if (msg.kind === 'agent-finished') {
+    STATE.agentChild = null;
+    STATE.agentRunId = null;
+    try { chrome.runtime.sendMessage({ type: 'AGENT_FINISHED', runId: msg.runId, code: msg.code }); } catch {}
+    return;
+  }
+});
+
 // capture_state: full state bundle for the controller
 // ------------------------------------------------------------------
 async function captureState(tabId, opts) {
@@ -1006,6 +1041,82 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           break;
         }
         case 'CLEAR_LOG':     STATE.log = []; sendResponse({ ok: true }); break;
+        // ---- Agent mode: spawned by the popup. We shell out to
+        // `node agent.mjs` with the goal as the first arg. The
+        // spawned process talks to the controller's WebSocket
+        // directly; we just keep the popup informed of its
+        // progress via chrome.runtime.sendMessage.
+        case 'AGENT_START': {
+          if (STATE.agentChild) {
+            sendResponse({ ok: false, error: 'agent already running' });
+            break;
+          }
+          const goal = String(msg.goal || '').trim();
+          if (!goal) { sendResponse({ ok: false, error: 'goal is required' }); break; }
+          const startUrl  = msg.startUrl || null;
+          const provider  = msg.provider || 'auto';
+          const apiKey    = msg.apiKey   || null;
+          const controllerUrl = (STATE.config && STATE.config.controllerUrl)
+            || (typeof process !== 'undefined' && process.env && process.env.CONTROLLER_URL)
+            || 'ws://127.0.0.1:9223/ws';
+          const portMatch = controllerUrl.match(/:(\d+)/);
+          const controllerPort = portMatch ? portMatch[1] : '9223';
+          const env = {
+            CONTROLLER_URL: controllerUrl,
+            CONTROLLER_PORT: controllerPort,
+          };
+          if (provider === 'proxy') env.LLM_PROXY = '1';
+          if (apiKey) {
+            if (provider === 'minimax') env.MINIMAX_API_KEY = apiKey;
+            else if (provider === 'openai') env.OPENAI_API_KEY = apiKey;
+            else env.OPENAI_API_KEY = apiKey; // default
+          }
+          // The service worker can't spawn child processes
+          // directly. Delegate to the offscreen document, which
+          // is a real page and has full Node access.
+          await ensureOffscreen();
+          const runId = 'run-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+          const r = await chrome.runtime.sendMessage({ kind: 'agent-start', goal, startUrl, controllerUrl, env, runId });
+          if (r && r.ok) {
+            STATE.agentChild = { runId, pid: r.pid };
+            STATE.agentRunId = runId;
+            STATE.agentGoal  = goal;
+            // Pin the extension to a new tab for this run unless
+            // the agent will open its own (it will, when given a
+            // startUrl, otherwise reuses the active tab).
+            if (startUrl) {
+              const t = await chrome.tabs.create({ url: startUrl, active: false });
+              STATE.agentTabId  = t.id;
+              STATE.activeTabId = t.id;
+            }
+            sendResponse({ ok: true, runId, tabId: STATE.agentTabId, pid: r.pid });
+          } else {
+            sendResponse(r || { ok: false, error: 'agent start failed' });
+          }
+          break;
+        }
+        case 'AGENT_STOP': {
+          try {
+            await ensureOffscreen();
+            const r = await chrome.runtime.sendMessage({ kind: 'agent-stop' });
+            STATE.agentChild = null;
+            STATE.agentRunId = null;
+            STATE.agentTabId = null;
+            STATE.agentGoal  = null;
+            sendResponse(r || { ok: true });
+          } catch (e) { sendResponse({ ok: false, error: e.message }); }
+          break;
+        }
+        case 'AGENT_STATUS': {
+          sendResponse({
+            ok: true,
+            active: !!STATE.agentChild,
+            runId:  STATE.agentRunId,
+            tabId:  STATE.agentTabId,
+            goal:   STATE.agentGoal,
+          });
+          break;
+        }
         default: sendResponse({ ok: false, error: 'Unknown message type: ' + msg.type });
       }
     } catch (e) {
@@ -1120,4 +1231,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 })();
 
 chrome.tabs.onRemoved.addListener((tabId) => { attachedTabs.delete(tabId); });
-chrome.tabs.onActivated.addListener(({ tabId }) => { STATE.activeTabId = tabId; });
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  if (STATE.agentPinned && STATE.agentTabId && tabId !== STATE.agentTabId) {
+    // The agent is running on another tab. The user can still
+    // switch around in the UI, but the extension's own action
+    // routing keeps pointing at the agent's tab. We just update
+    // activeTabId for the popup to display, but the agent's
+    // actions still flow to agentTabId.
+  }
+  STATE.activeTabId = tabId;
+});

@@ -215,6 +215,67 @@ It verifies:
 5. **Type** — focuses the actual `#text-input` landmark, then
    dispatches the type action; verifies the input value matches.
 
+## Autonomous agent
+
+The agent (`agent.mjs`) is an LLM-driven loop that takes a natural-
+language goal, opens a fresh tab in your existing Chrome, and drives
+the browser autonomously — no headless instance, no separate Chrome
+profile, no `xvfb`. The agent runs in your real browser session with
+your logged-in state, your cookies, and your extensions.
+
+**You can walk away.** The agent opens a new tab pinned to itself, so
+you can keep using your other tabs without breaking the agent's
+context. Progress streams live to the popup; the final report is
+written to a file you can read later.
+
+### Three ways to start
+
+```bash
+# 1. CLI — runs in a Node process, streams log to terminal
+npm run agent:cli -- "find 10 landscapers in Jonesboro GA that don't have a website"
+
+# 2. CLI with explicit start URL
+npm run agent:cli -- "log in to example.com and check the dashboard" \
+  --url https://example.com/login
+
+# 3. Popup — click the extension icon, type the goal, click Start agent
+```
+
+### LLM provider
+
+Auto-detected from env (in priority order):
+
+| Env var | Endpoint | Use when |
+|---|---|---|
+| `MINIMAX_API_KEY` | `https://api.minimax.chat/v1/chat/completions` | default |
+| `OPENAI_API_KEY`  | `https://api.openai.com/v1/chat/completions` | OpenAI / compatible |
+| `ANTHROPIC_API_KEY` | via `OPENAI_BASE_URL` proxy | Anthropic |
+| `LLM_PROXY=1` | `http://127.0.0.1:9223/llm` | key stored in the extension popup |
+
+The `LLM_PROXY=1` mode is the most production-safe: the user stores
+the API key in the extension's storage; the agent process never sees
+it. The controller's `/llm` HTTP endpoint proxies requests using
+the stored key.
+
+### Action surface
+
+The agent emits one JSON action per LLM turn:
+
+```json
+{"action":"click_by_tag","params":{"num":3},"thought":"click the submit button"}
+{"action":"scroll","params":{"direction":"down","amount":600}}
+{"action":"finish","params":{"summary":"found 10 businesses"}}
+```
+
+Full list: `navigate`, `click`, `click_by_tag`, `type`, `type_by_tag`,
+`scroll`, `hover`, `evaluate`, `wait`, `finish`.
+
+### Output
+
+Each run writes a JSON report to `logs/agent-<timestamp>.json` (or
+`--report <path>`). The report includes the goal, the working tab
+id, every step's action + result, and the LLM's final summary.
+
 ## Validation matrix
 
 Verified end-to-end against the spec (mock extension driving a real

@@ -181,3 +181,120 @@ async function refreshHistory(controllerPort) {
     }
   } catch (e) { /* controller not running — ignore */ }
 }
+
+
+// ------------------------------------------------------------------
+// Agent panel — runs the agent loop in a child Node process spawned
+// from the controller's user-data dir, with stdout streamed back to
+// the popup via chrome.runtime messaging. The agent itself lives in
+// agent.mjs and uses the same controller WebSocket as any other
+// client.
+//
+// We use chrome.runtime.connectNative? No — that requires a native
+// messaging host. Instead, we shell out to `node agent.mjs` from the
+// extension's directory. The extension's background script holds the
+// controller's URL, so the spawned agent can talk to the same
+// controller.
+// ------------------------------------------------------------------
+
+(function initAgentPanel() {
+  const $ = (id) => document.getElementById(id);
+  let agentProc = null; // not used directly; the background script spawns
+
+  function appendLog(level, msg) {
+    const body = $('agentLog');
+    if (!body) return;
+    const div = document.createElement('div');
+    div.className = 'entry ' + level;
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = '[' + new Date().toLocaleTimeString() + ']';
+    div.appendChild(ts);
+    div.appendChild(document.createTextNode(' ' + msg));
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function setStatus(text, running) {
+    const el = $('agentStatus');
+    if (!el) return;
+    el.textContent = text;
+    el.className = running ? 'status connected' : 'muted';
+  }
+
+  $('agentStart').addEventListener('click', async () => {
+    const goal = $('agentGoal').value.trim();
+    if (!goal) { appendLog('warn', 'enter a goal first'); return; }
+    const newTab = $('agentNewTab').checked;
+    const pinned = $('agentPinned').checked;
+    const startUrl = $('agentStartUrl').value.trim() || null;
+    const provider = $('agentProvider').value;
+    const apiKey   = $('agentApiKey').value.trim() || null;
+    appendLog('info', 'starting agent: ' + goal);
+    setStatus('Starting…', true);
+    $('agentStart').disabled = true;
+    $('agentStop').disabled = false;
+    const r = await chrome.runtime.sendMessage({
+      type: 'AGENT_START',
+      goal, newTab, pinned, startUrl, provider, apiKey,
+    });
+    if (!r || !r.ok) {
+      appendLog('error', 'failed to start: ' + (r && r.error || 'unknown'));
+      setStatus('Idle', false);
+      $('agentStart').disabled = false;
+      $('agentStop').disabled = true;
+      return;
+    }
+    appendLog('ok', 'agent started, runId=' + r.runId + ' tab=' + r.tabId);
+    setStatus('Running on tab ' + r.tabId, true);
+  });
+
+  $('agentStop').addEventListener('click', async () => {
+    appendLog('info', 'stopping agent…');
+    const r = await chrome.runtime.sendMessage({ type: 'AGENT_STOP' });
+    if (r && r.ok) {
+      appendLog('ok', 'agent stopped');
+      setStatus('Idle', false);
+      $('agentStart').disabled = false;
+      $('agentStop').disabled = true;
+    } else {
+      appendLog('error', 'failed to stop: ' + (r && r.error || 'unknown'));
+    }
+  });
+
+  // Listen for agent log lines pushed from the background script.
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === 'AGENT_LOG') appendLog(msg.level || 'info', msg.line);
+    if (msg && msg.type === 'AGENT_SCREENSHOT') {
+      const box = $('agentScreenshotBox');
+      if (box && msg.dataUrl) {
+        box.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = msg.dataUrl;
+        img.style.maxWidth = '100%';
+        img.style.borderRadius = '4px';
+        box.appendChild(img);
+      }
+    }
+    if (msg && msg.type === 'AGENT_FINISHED') {
+      appendLog('ok', 'agent finished: ' + (msg.summary || '(no summary)'));
+      setStatus('Finished', false);
+      $('agentStart').disabled = false;
+      $('agentStop').disabled = true;
+    }
+  });
+
+  // Initial state poll: if an agent is already running, reflect that.
+  (async function poll() {
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'AGENT_STATUS' });
+      if (r && r.ok && r.active) {
+        appendLog('info', 'agent already running on tab ' + r.tabId);
+        setStatus('Running on tab ' + r.tabId, true);
+        $('agentStart').disabled = true;
+        $('agentStop').disabled = false;
+      }
+    } catch {}
+    setTimeout(poll, 3000);
+  })();
+})();

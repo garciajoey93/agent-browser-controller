@@ -99,6 +99,58 @@
   </section>
 
   <section class="card">
+    <h2>🤖 Autonomous agent</h2>
+    <p class="muted" style="margin:0 0 8px">Give the agent a goal and walk away. It opens a fresh tab, drives the LLM loop, and reports back here.</p>
+    <label>
+      Goal
+      <textarea id="agentGoal" rows="2" placeholder="e.g. Find 10 landscaping businesses in Jonesboro GA that don't have a website"></textarea>
+    </label>
+    <div class="row">
+      <label class="checkbox">
+        <input id="agentNewTab" type="checkbox" checked />
+        <span>Open a fresh tab</span>
+      </label>
+      <label class="checkbox">
+        <input id="agentPinned" type="checkbox" checked />
+        <span>Pin to that tab (so switching tabs doesn't break it)</span>
+      </label>
+    </div>
+    <div class="row">
+      <label class="grow">
+        Start URL (optional)
+        <input id="agentStartUrl" type="text" placeholder="https://www.google.com/search?q=...">
+      </label>
+    </div>
+    <div class="row">
+      <label class="grow">
+        Provider
+        <select id="agentProvider">
+          <option value="auto">Auto (env var / popup key)</option>
+          <option value="minimax">MiniMax M3</option>
+          <option value="openai">OpenAI / compatible</option>
+          <option value="proxy">Use controller /llm proxy</option>
+        </select>
+      </label>
+      <label class="grow">
+        API key (optional — overrides popup-saved key)
+        <input id="agentApiKey" type="password" placeholder="leave blank to use popup / env">
+      </label>
+    </div>
+    <div class="row">
+      <button id="agentStart" class="primary">▶ Start agent</button>
+      <button id="agentStop" disabled>■ Stop</button>
+      <span class="grow"></span>
+      <span id="agentStatus" class="muted">Idle</span>
+    </div>
+    <h3 class="subhead">Agent log</h3>
+    <div id="agentLog" class="log-body" style="max-height:200px"></div>
+    <h3 class="subhead">Agent's working tab</h3>
+    <div id="agentScreenshotBox" class="screenshot">
+      <div class="placeholder">Start an agent run to see the live tab here.</div>
+    </div>
+  </section>
+
+  <section class="card">
     <div class="row spread">
       <h2>Log</h2>
       <button id="clearLog" class="link-btn">clear</button>

@@ -11,7 +11,10 @@
     "start": "node controller-server.js",
     "start:public": "node controller-server.js --host 0.0.0.0",
     "test": "node --test tests/*.test.mjs",
-    "push:linear": "node scripts/push-to-linear.mjs"
+    "push:linear": "node scripts/push-to-linear.mjs",
+    "agent": "node agent.mjs",
+    "agent:dev": "node agent.mjs",
+    "agent:cli": "node scripts/agent-cli.mjs"
   },
   "engines": {
     "node": ">=18"

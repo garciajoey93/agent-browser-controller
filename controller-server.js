@@ -45,6 +45,56 @@ let extensionWs = null;
 const clients    = new Set();
 const sseClients  = new Set();
 
+// ------------------------------------------------------------------
+// Agent registry: tracks every autonomous agent run (id, goal,
+// working tab, last step). Populated by background.js when the
+// agent mode is engaged; /agent/status exposes the list.
+// ------------------------------------------------------------------
+const agents = new Map(); // id -> { id, goal, startedAt, lastStepAt, steps, workingTabId, lastAction, log }
+
+// ------------------------------------------------------------------
+// LLM config cache: refreshed by background.js via the
+// 'SAVE_LLM_CONFIG' message so the /llm proxy endpoint can
+// forward requests using the user's stored key without ever
+// exposing the key to the agent process.
+// ------------------------------------------------------------------
+let _llmConfig = null;
+function agentsHaveLlm() {
+  if (process.env.MINIMAX_API_KEY || process.env.OPENAI_API_KEY) return true;
+  if (_llmConfig && _llmConfig.apiKey) return true;
+  return false;
+}
+async function getLlmConfig() {
+  // Refresh from the extension (the source of truth) if we have one.
+  if (extensionWs && extensionWs.readyState === 1) {
+    try {
+      const r = await sendToExtension({ type: 'GET_LLM_CONFIG' }, 4000);
+      if (r && r.ok && r.config && r.config.apiKey) {
+        _llmConfig = r.config;
+      }
+    } catch {}
+  }
+  // Fall back to env vars if the extension didn't provide anything.
+  if (!_llmConfig) {
+    if (process.env.MINIMAX_API_KEY) {
+      _llmConfig = {
+        provider: 'minimax',
+        url: (process.env.MINIMAX_BASE_URL || 'https://api.minimax.chat') + '/v1/chat/completions',
+        model: process.env.LLM_MODEL || 'minimax/minimax-m3',
+        apiKey: process.env.MINIMAX_API_KEY,
+      };
+    } else if (process.env.OPENAI_API_KEY) {
+      _llmConfig = {
+        provider: 'openai',
+        url: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1/chat/completions',
+        model: process.env.LLM_MODEL || 'gpt-4o-mini',
+        apiKey: process.env.OPENAI_API_KEY,
+      };
+    }
+  }
+  return _llmConfig;
+}
+
 // IPI-307/310/311: metrics, history, in-flight tracking. Every action is
 // recorded here so /history, /metrics, /action/replay/:id can serve
 // it without re-asking the extension. Bounded by MAX_HISTORY entries.
@@ -268,6 +318,13 @@ const KNOWN_ACTIONS = new Set([
   'move_mouse', 'element_info', 'hover_preview',
   'show_grid', 'hide_grid', 'show_selection', 'hide_selection',
   'set_tag_filter', 'flash_tag',
+  // Agent mode: pin the extension to a specific tab, heartbeat
+  // progress, and read the agent's run state.
+  'agent_start', 'agent_step', 'agent_stop', 'agent_status',
+  // LLM config: the user stores their API key in the extension;
+  // these actions let the agent (or the controller's /llm proxy)
+  // read or update that config.
+  'save_llm_config', 'get_llm_config',
 ]);
 function validateAction(body) {
   if (!body || typeof body !== 'object') {
@@ -375,6 +432,50 @@ async function handleHttp(req, res) {
         queues.delete(sessionId);
       }
       return jsonResponse(res, 200, { ok: true, remaining: Array.from(queues.keys()) });
+    }
+    if (url.pathname === '/llm' && req.method === 'POST') {
+      // LLM proxy. The agent sends { messages, model?, ... } and
+      // we forward to the configured MiniMax / OpenAI endpoint
+      // using the API key the user stored in the extension. The
+      // agent process never sees the key.
+      //
+      // The extension provides the key + endpoint via a
+      // 'GET_LLM_CONFIG' WS message stored in a global. If no
+      // key is set, we return a 503 so the agent can fall back
+      // to using its own env var.
+      const body = await readBody(req);
+      const llmCfg = await getLlmConfig();
+      if (!llmCfg) {
+        return jsonResponse(res, 503, {
+          ok: false,
+          error: 'no LLM configured. Either set MINIMAX_API_KEY in the env, or open the extension popup and save an API key under Settings.',
+        });
+      }
+      try {
+        const upstream = await fetch(llmCfg.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + llmCfg.apiKey },
+          body: JSON.stringify(Object.assign({ model: llmCfg.model }, body)),
+        });
+        const text = await upstream.text();
+        res.writeHead(upstream.status, {
+          'Content-Type': upstream.headers.get('content-type') || 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        return res.end(text);
+      } catch (e) {
+        return jsonResponse(res, 502, { ok: false, error: 'LLM upstream failed: ' + e.message });
+      }
+    }
+    if (url.pathname === '/agent/status' && req.method === 'GET') {
+      return jsonResponse(res, 200, {
+        ok: true,
+        agents: Array.from(agents.values()).map(a => ({
+          id: a.id, goal: a.goal, startedAt: a.startedAt, lastStepAt: a.lastStepAt,
+          steps: a.steps, workingTabId: a.workingTabId, lastAction: a.lastAction,
+        })),
+        llm: agentsHaveLlm(),
+      });
     }
     if (url.pathname === '/metrics' && req.method === 'GET') {
       const lines = [
@@ -508,6 +609,22 @@ wss.on('connection', (ws, req) => {
     try {
     // First message identifies role
     if (!role) {
+      if (msg.role === 'agent') {
+        // agent role: same surface as 'client' (can send actions,
+        // receive events) but tracked separately so logs + future
+        // policy can distinguish a real human user from an
+        // autonomous agent run. The agent's own API key for the
+        // LLM is held by the extension; the agent talks to the
+        // controller's /llm HTTP endpoint to keep the key out of
+        // the agent's process.
+        role = 'agent';
+        clients.add(ws);
+        console.log('[ws] agent registered', addr);
+        clearTimeout(helloTimer);
+        send(ws, { type: 'hello-ack', role: 'agent',
+                   extensionConnected: !!(extensionWs && extensionWs.readyState === 1) });
+        return;
+      }
       if (msg.role === 'extension') {
         // IPI-306: optional bearer-token auth. If CONTROLLER_AUTH_TOKEN
         // is set in the env, the first message from the extension
@@ -541,6 +658,36 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
+    // Extension or agent → server: control messages (no id,
+    // fire-and-forget). The agent process keeps its own entry in
+    // the agent registry fresh by sending AGENT_UPDATE each step;
+    // the extension pushes the user's stored LLM config so /llm
+    // can proxy without re-asking.
+    if ((role === 'extension' || role === 'agent') && !msg.id) {
+      if (msg.type === 'SAVE_LLM_CONFIG') {
+        _llmConfig = msg.config || null;
+        send(ws, { ok: true, saved: !!_llmConfig });
+        return;
+      }
+      if (msg.type === 'AGENT_REGISTER') {
+        const a = Object.assign({ startedAt: Date.now(), lastStepAt: Date.now(), steps: 0, addr }, msg.agent || {});
+        agents.set(a.id, a);
+        send(ws, { ok: true, registered: a.id });
+        return;
+      }
+      if (msg.type === 'AGENT_UPDATE') {
+        const a = agents.get(msg.runId);
+        if (a) Object.assign(a, msg.patch || {}, { lastStepAt: Date.now() });
+        send(ws, { ok: !!a, runId: msg.runId });
+        return;
+      }
+      if (msg.type === 'AGENT_UNREGISTER') {
+        const had = agents.delete(msg.runId);
+        send(ws, { ok: had, runId: msg.runId });
+        return;
+      }
+    }
+
     // Extension → server: response to a pending request
     if (role === 'extension' && msg.id && pending.has(msg.id)) {
       const p = pending.get(msg.id);
@@ -553,11 +700,11 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // Client → server: action request (or control)
-    if (role === 'client') {
+    // Client / Agent → server: action request (or control)
+    if (role === 'client' || role === 'agent') {
       if (msg.type === 'ping') return send(ws, { type: 'pong', ts: Date.now() });
       if (msg.type === 'broadcast') {
-        broadcastToClients({ type: 'event', event: 'broadcast', from: addr, payload: msg.payload });
+        broadcastToClients({ type: 'event', event: 'broadcast', from: addr, fromRole: role, payload: msg.payload });
         return;
       }
       if (msg.action) {
@@ -603,9 +750,9 @@ wss.on('connection', (ws, req) => {
       for (const id of Array.from(pending.keys())) {
         rejectPending(id, new Error('Extension disconnected'));
       }
-    } else if (role === 'client') {
+    } else if (role === 'client' || role === 'agent') {
       clients.delete(ws);
-      console.log('[ws] client disconnected', addr);
+      console.log('[ws] ' + role + ' disconnected', addr);
     }
   });
 
