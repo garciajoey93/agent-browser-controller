@@ -40,6 +40,13 @@ function connect(url) {
   ws.addEventListener('message', (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
+    // Controller asks us to reload (e.g. after a file change so
+    // the service worker picks up the new background.js code).
+    if (msg.type === 'reload') {
+      log('info', 'reload requested by controller; calling chrome.runtime.reload()');
+      try { chrome.runtime.reload(); } catch (e) { log('error', 'reload failed: ' + e.message); }
+      return;
+    }
     // Forward incoming action requests to the service worker.
     if (msg.action) {
       chrome.runtime.sendMessage({ kind: 'offscreen-action', msg })

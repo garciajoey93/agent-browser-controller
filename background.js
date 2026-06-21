@@ -988,6 +988,11 @@ function publicConfig() {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // IPI-306b: only the popup uses msg.type. The offscreen
+  // document uses msg.kind. If the message has no msg.type
+  // (i.e. it's from the offscreen), let the other listener
+  // handle it — don't fall into the default error case.
+  if (!msg || !msg.type) return false;
   (async () => {
     try {
       switch (msg.type) {
