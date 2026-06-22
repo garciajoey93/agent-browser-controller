@@ -49,6 +49,57 @@ function updateStatus(r) {
     : 'No active tab';
 }
 
+// Track stats
+let STATS = { connectedSince: null, actionCount: 0, queueSize: 0, latencies: [] };
+
+function fmtUptime(ms) {
+  if (!ms || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+async function refreshStats() {
+  const port = 9223;
+  try {
+    const [status, metrics, queue] = await Promise.all([
+      fetch('http://127.0.0.1:' + port + '/status').then((r) => r.json()).catch(() => null),
+      fetch('http://127.0.0.1:' + port + '/metrics').then((r) => r.text()).catch(() => null),
+      fetch('http://127.0.0.1:' + port + '/queue').then((r) => r.json()).catch(() => null),
+    ]);
+    if (status && status.extensionConnected && !STATS.connectedSince) {
+      STATS.connectedSince = Date.now();
+    } else if (status && !status.extensionConnected) {
+      STATS.connectedSince = null;
+    }
+    const uptimeEl = document.getElementById('statUptime');
+    if (uptimeEl) uptimeEl.textContent = STATS.connectedSince ? fmtUptime(Date.now() - STATS.connectedSince) : '—';
+    const actionsEl = document.getElementById('statActions');
+    if (actionsEl && metrics) {
+      const m = metrics.match(/^agent_actions_total (\d+)/m);
+      if (m) actionsEl.textContent = m[1];
+    }
+    const queueEl = document.getElementById('statQueue');
+    if (queueEl && queue && queue.queues) {
+      const total = Object.values(queue.queues).reduce((a, q) => a + (q.size || 0), 0);
+      queueEl.textContent = String(total);
+    }
+    // p99 from /history (last 100 actions)
+    try {
+      const hist = await fetch('http://127.0.0.1:' + port + '/history?sessionId=default').then((r) => r.json()).catch(() => null);
+      if (hist && hist.history && hist.history.length) {
+        const lats = hist.history.map((h) => h.ms || 0).filter((m) => m > 0).sort((a, b) => a - b);
+        if (lats.length) {
+          const p99 = lats[Math.floor(lats.length * 0.99)];
+          const p99El = document.getElementById('statP99');
+          if (p99El) p99El.textContent = p99 + 'ms';
+        }
+      }
+    } catch {}
+  } catch {}
+}
+
 function renderLog(entries) {
   const body = $('log');
   body.innerHTML = '';
@@ -157,6 +208,10 @@ async function refreshStatus() {
 
 loadConfig();
 setInterval(refreshStatus, 2000);
+setInterval(refreshStats, 3000);
+refreshStats();
+setInterval(refreshStats, 3000);
+refreshStats();
 
 
 // IPI-319: fetch and render the last few actions from the

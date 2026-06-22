@@ -104,7 +104,7 @@ const METRICS = {
   actions_err: 0,
   inflight: new Map(),    // clientKey -> count
   history:   [],          // newest at the end
-  MAX_INFLIGHT_PER_CLIENT: 64,
+  MAX_INFLIGHT_PER_CLIENT: parseInt(process.env.MAX_INFLIGHT_PER_CLIENT || '64', 10),
   MAX_HISTORY: 1000,
 };
 const pending    = new Map(); // id -> { resolve, reject, timer }
@@ -195,19 +195,33 @@ function pruneQueue(sessionId) {
 
 function enqueueAction(sessionId, request) {
   pruneQueue(sessionId);
+  // IPI-307: idempotency check applies to queued actions too.
+  // The same idem key always returns the same queued response,
+  // so the AI agent can retry safely.
+  if (request && request.idempotencyKey) {
+    purgeCompleted();
+    const cached = completed.get(request.idempotencyKey);
+    if (cached) return { ...cached.response, _idempotent_replay: true };
+  }
   const q = getQueue(sessionId);
   if (q.length >= MAX_QUEUE_SIZE) {
     return { ok: false, error: 'QUEUE_FULL', queueSize: q.length };
   }
   const entry = { id: request.id || randomUUID(), request, ts: Date.now() };
   q.push(entry);
-  return {
+  const response = {
     ok: true, queued: true,
     id: entry.id, sessionId,
     position: q.length,
     queueSize: q.length,
     estWaitMs: Math.min(MAX_QUEUE_AGE_MS, q.length * 2000),
   };
+  // Cache the response so a duplicate idem key (within 5 min) returns
+  // the same queued response — including the same id and position.
+  if (request && request.idempotencyKey) {
+    completed.set(request.idempotencyKey, { response, ts: Date.now() });
+  }
+  return response;
 }
 
 function drainQueueOnReconnect() {
@@ -498,12 +512,23 @@ async function handleHttp(req, res) {
     }
     if (url.pathname.startsWith('/action/replay/') && req.method === 'POST') {
       const id = url.pathname.split('/').pop();
+      // Look in the history first, then the queued entries.
+      let action = null, params = null, source = null;
       const hist = METRICS.history.find(h => h.id === id);
-      if (!hist) return jsonResponse(res, 404, { ok: false, error: 'unknown action id', errorCode: 'NOT_FOUND' });
-      const replayReq = { id: randomUUID(), action: hist.action, params: Object.assign({}, hist.params || {}, { _replayOf: id }) };
+      if (hist) { action = hist.action; params = hist.params; source = 'history'; }
+      if (!action) {
+        for (const [sessionId, q] of queues) {
+          for (const e of q) {
+            if (e.id === id) { action = e.request.action; params = e.request.params; source = 'queue'; break; }
+          }
+          if (action) break;
+        }
+      }
+      if (!action) return jsonResponse(res, 404, { ok: false, error: 'unknown action id', errorCode: 'NOT_FOUND' });
+      const replayReq = { id: randomUUID(), action, params: Object.assign({}, params || {}, { _replayOf: id }) };
       try {
         const result = await sendToExtension(replayReq);
-        return jsonResponse(res, 200, { ok: true, replayOf: id, result });
+        return jsonResponse(res, 200, { ok: true, replayOf: id, source, result });
       } catch (e) {
         return jsonResponse(res, 502, { ok: false, error: e.message });
       }
@@ -625,17 +650,20 @@ wss.on('connection', (ws, req) => {
                    extensionConnected: !!(extensionWs && extensionWs.readyState === 1) });
         return;
       }
+      // IPI-306: optional bearer-token auth. When CONTROLLER_AUTH_TOKEN
+      // is set in the env, the first message from any peer must include
+      // { auth: '<token>' } (in addition to {role: ...}). Mismatched
+      // tokens are rejected with a 1008 close code. Applies to
+      // extension, client, AND agent roles so the WS surface is
+      // uniformly protected.
+      if (process.env.CONTROLLER_AUTH_TOKEN &&
+          msg.auth !== process.env.CONTROLLER_AUTH_TOKEN) {
+        console.log('[ws] auth failed for role=' + msg.role + ' (env token required), closing', addr);
+        send(ws, { type: 'error', error: 'AUTH_FAILED' });
+        try { ws.close(1008, 'auth failed'); } catch {}
+        return;
+      }
       if (msg.role === 'extension') {
-        // IPI-306: optional bearer-token auth. If CONTROLLER_AUTH_TOKEN
-        // is set in the env, the first message from the extension
-        // must include { role: 'extension', auth: '<token>' }.
-        if (process.env.CONTROLLER_AUTH_TOKEN &&
-            msg.auth !== process.env.CONTROLLER_AUTH_TOKEN) {
-          console.log('[ws] extension auth failed, closing', addr);
-          send(ws, { type: 'error', error: 'AUTH_FAILED' });
-          try { ws.close(1008, 'auth failed'); } catch {}
-          return;
-        }
         role = 'extension';
         if (extensionWs && extensionWs !== ws) {
           try { extensionWs.close(1000, 'replaced'); } catch {}
@@ -713,11 +741,33 @@ wss.on('connection', (ws, req) => {
           send(ws, { id: msg.id, ...validationError });
           return;
         }
+        // IPI-307: idempotency key dedupe on the WS path too.
+        // Same pattern as forwardToExtension — check the in-flight
+        // map first, then the completed cache for 5-min replay.
+        if (msg.idempotencyKey) {
+          purgeCompleted();
+          const cached = completed.get(msg.idempotencyKey);
+          if (cached) {
+            send(ws, { id: msg.id, ...cached.response, _idempotent_replay: true });
+            return;
+          }
+        }
+        // IPI-310: per-WS in-flight cap. Same per-IP key the HTTP
+        // path uses, so a noisy WS client gets the same 429 the
+        // HTTP path returns.
+        const clientKey = addr.split(':')[0] || 'unknown';
+        if ((METRICS.inflight.get(clientKey) || 0) >= METRICS.MAX_INFLIGHT_PER_CLIENT) {
+          send(ws, { id: msg.id, ok: false, error: 'too many in-flight requests for this client', errorCode: 'RATE_LIMITED' });
+          return;
+        }
+        incrInflight(clientKey);
         try {
           const result = await sendToExtension(msg);
           send(ws, { id: msg.id, ...result });
         } catch (e) {
           send(ws, { id: msg.id, ok: false, error: e.message, errorCode: 'EXTENSION_UNAVAILABLE' });
+        } finally {
+          decrInflight(clientKey);
         }
         return;
       }
