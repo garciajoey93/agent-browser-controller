@@ -158,6 +158,23 @@ function decrInflight(clientKey) {
   if (n <= 1) METRICS.inflight.delete(clientKey);
   else METRICS.inflight.set(clientKey, n - 1);
 }
+// IPI-310b: per-client "pending" counter covers BOTH in-flight
+// (forwarded to extension) AND queued (extension disconnected).
+// This makes the rate limit a real backpressure signal, not just
+// a per-action timeout governor.
+function incrPending(clientKey) {
+  METRICS.pending = METRICS.pending || new Map();
+  METRICS.pending.set(clientKey, (METRICS.pending.get(clientKey) || 0) + 1);
+}
+function decrPending(clientKey) {
+  METRICS.pending = METRICS.pending || new Map();
+  const n = METRICS.pending.get(clientKey) || 0;
+  if (n <= 1) METRICS.pending.delete(clientKey);
+  else METRICS.pending.set(clientKey, n - 1);
+}
+function pendingCount(clientKey) {
+  return (METRICS.pending && METRICS.pending.get(clientKey)) || 0;
+}
 function recordAction(entry) {
   METRICS.history.push(entry);
   if (METRICS.history.length > METRICS.MAX_HISTORY) {
@@ -201,7 +218,7 @@ function enqueueAction(sessionId, request) {
   if (request && request.idempotencyKey) {
     purgeCompleted();
     const cached = completed.get(request.idempotencyKey);
-    if (cached) return { ...cached.response, _idempotent_replay: true };
+    if (cached) return { ...cached.response, id: request.id || cached.response.id, _idempotent_replay: true };
   }
   const q = getQueue(sessionId);
   if (q.length >= MAX_QUEUE_SIZE) {
@@ -252,7 +269,7 @@ function forwardToExtension(request) {
       purgeCompleted();
       const cached = completed.get(idemKey);
       if (cached) {
-        return resolve({ ...cached.response, _idempotent_replay: true });
+        return resolve({ ...cached.response, id: request.id, _idempotent_replay: true });
       }
     }
     if (!extensionWs || extensionWs.readyState !== extensionWs.OPEN) {
@@ -386,9 +403,15 @@ async function handleHttp(req, res) {
       // IP+port would let a single client bypass the limit by
       // opening many parallel connections.
       const clientKey = req.socket.remoteAddress || 'unknown';
-      if ((METRICS.inflight.get(clientKey) || 0) >= METRICS.MAX_INFLIGHT_PER_CLIENT) {
-        return jsonResponse(res, 429, { ok: false, error: 'too many in-flight requests for this client', errorCode: 'RATE_LIMITED' });
+      // Count in-flight + queued so the cap is a real backpressure
+      // signal even when the extension is disconnected (in which
+      // case every action queues instantly and the inflight counter
+      // alone never stays high long enough to trip).
+      const pending = pendingCount(clientKey) + 1;
+      if (pending > METRICS.MAX_INFLIGHT_PER_CLIENT) {
+        return jsonResponse(res, 429, { ok: false, error: 'too many pending requests for this client (backpressure)', errorCode: 'RATE_LIMITED', pending, limit: METRICS.MAX_INFLIGHT_PER_CLIENT });
       }
+      incrPending(clientKey);
       incrInflight(clientKey);
       const t0 = Date.now();
       try {
@@ -400,6 +423,7 @@ async function handleHttp(req, res) {
         return jsonResponse(res, 502, { ok: false, error: e.message, errorCode: 'EXTENSION_UNAVAILABLE' });
       } finally {
         decrInflight(clientKey);
+        decrPending(clientKey);
       }
     }
     if (url.pathname === '/inspect' && req.method === 'GET') {
@@ -748,18 +772,25 @@ wss.on('connection', (ws, req) => {
           purgeCompleted();
           const cached = completed.get(msg.idempotencyKey);
           if (cached) {
-            send(ws, { id: msg.id, ...cached.response, _idempotent_replay: true });
+            // Spread cached.response FIRST, then override id so the
+            // caller's pending map (keyed by msg.id) finds the
+            // response. Without the override, spread would clobber
+            // msg.id with the cached one.
+            send(ws, { ...cached.response, id: msg.id, _idempotent_replay: true });
             return;
           }
         }
-        // IPI-310: per-WS in-flight cap. Same per-IP key the HTTP
-        // path uses, so a noisy WS client gets the same 429 the
-        // HTTP path returns.
+        // IPI-310: per-WS pending cap. Count queued + in-flight so
+        // the cap is a real backpressure signal even when the
+        // extension is disconnected. A noisy WS client firing
+        // 1000 actions/sec gets the same 429 the HTTP path returns.
         const clientKey = addr.split(':')[0] || 'unknown';
-        if ((METRICS.inflight.get(clientKey) || 0) >= METRICS.MAX_INFLIGHT_PER_CLIENT) {
-          send(ws, { id: msg.id, ok: false, error: 'too many in-flight requests for this client', errorCode: 'RATE_LIMITED' });
+        const pending = pendingCount(clientKey) + 1;
+        if (pending > METRICS.MAX_INFLIGHT_PER_CLIENT) {
+          send(ws, { id: msg.id, ok: false, error: 'too many pending requests for this client (backpressure)', errorCode: 'RATE_LIMITED', pending, limit: METRICS.MAX_INFLIGHT_PER_CLIENT });
           return;
         }
+        incrPending(clientKey);
         incrInflight(clientKey);
         try {
           const result = await sendToExtension(msg);
@@ -768,6 +799,7 @@ wss.on('connection', (ws, req) => {
           send(ws, { id: msg.id, ok: false, error: e.message, errorCode: 'EXTENSION_UNAVAILABLE' });
         } finally {
           decrInflight(clientKey);
+          decrPending(clientKey);
         }
         return;
       }
