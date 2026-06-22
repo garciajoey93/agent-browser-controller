@@ -415,7 +415,7 @@ async function handleHttp(req, res) {
       incrInflight(clientKey);
       const t0 = Date.now();
       try {
-        const result = await sendToExtension(body);
+        const result = await sendToExtension(body, body.sessionId);
         recordAction({ id: body.id, action: body.action, params: body.params, ok: !!(result && result.ok), ms: Date.now() - t0, ts: t0, sessionId: body.sessionId || 'default' });
         return jsonResponse(res, 200, result);
       } catch (e) {
@@ -539,20 +539,23 @@ async function handleHttp(req, res) {
       // Look in the history first, then the queued entries.
       let action = null, params = null, source = null;
       const hist = METRICS.history.find(h => h.id === id);
-      if (hist) { action = hist.action; params = hist.params; source = 'history'; }
+      let originalSession = 'default';
+      if (hist) { action = hist.action; params = hist.params; source = 'history'; originalSession = hist.sessionId || 'default'; }
       if (!action) {
         for (const [sessionId, q] of queues) {
           for (const e of q) {
-            if (e.id === id) { action = e.request.action; params = e.request.params; source = 'queue'; break; }
+            if (e.id === id) { action = e.request.action; params = e.request.params; source = 'queue'; originalSession = sessionId; break; }
           }
           if (action) break;
         }
       }
       if (!action) return jsonResponse(res, 404, { ok: false, error: 'unknown action id', errorCode: 'NOT_FOUND' });
-      const replayReq = { id: randomUUID(), action, params: Object.assign({}, params || {}, { _replayOf: id }) };
+      const replayReq = { id: randomUUID(), action, sessionId: originalSession, params: Object.assign({}, params || {}, { _replayOf: id }) };
       try {
-        const result = await sendToExtension(replayReq);
-        return jsonResponse(res, 200, { ok: true, replayOf: id, source, result });
+        // Preserve the original sessionId so the replay lands in the
+        // same queue the user originally targeted, not 'default'.
+        const result = await sendToExtension(replayReq, originalSession);
+        return jsonResponse(res, 200, { ok: true, replayOf: id, source, sessionId: originalSession, result });
       } catch (e) {
         return jsonResponse(res, 502, { ok: false, error: e.message });
       }
@@ -648,7 +651,7 @@ wss.on('connection', (ws, req) => {
       console.log('[ws] no hello; closing', addr);
       try { ws.close(1008, 'no hello'); } catch {}
     }
-  }, 5000);
+  }, parseInt(process.env.WS_HELLO_TIMEOUT_MS || "5000", 10));
 
   ws.on('message', async (raw) => {
     let msg;
